@@ -204,3 +204,7 @@ Run initialization writes resources, pins and the start journal directly into th
 ### Public fixtures
 
 Private course planner outputs and Skill text were replaced with small fictional documentation fixtures. Artifact destinations, schema optionality, malformed-output diagnostics, source provenance and scoped repair remain covered. Shipped defaults contain only the two portable authoring Workflows. `npm run audit:publication` checks tracked files for common credentials, personal home paths, local session links and private data files.
+
+## 0.3.0: SDK runtime layout compatibility
+
+Replaces fixed dist/adjacent-peer imports with active SDK/AI entry bindings and a same-tree native MCP adapter. Public MCP exports take precedence; trusted Hosts can supply relocated module entries and local loader hooks. Detached workers receive the exact bindings and verify SDK package identity/version. Source-only and stale-dist fixtures exercise real offline SDK interfaces and detached child/Main execution. See [runtime bindings](SDK-RUNTIME.md).

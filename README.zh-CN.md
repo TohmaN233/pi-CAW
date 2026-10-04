@@ -2,7 +2,7 @@
 
 [English](README.md) | 简体中文
 
-独立的 Pi Agents Workflow 插件，迁移基线为 Codex Agents Workflow 1.1.1，并吸收其最新 Main worker/orchestration 和 Host 有界循环设计。当前面向 0.2.30 开发版本，Host 适配基线为 Pi SDK 1.0；包版本以 manifest 为准，运行时 SDK 版本从实际 Host 读取。
+独立的 Pi Agents Workflow 插件，迁移基线为 Codex Agents Workflow 1.1.1，并吸收其最新 Main worker/orchestration 和 Host 有界循环设计。当前版本为 **0.3.0**，Host 适配基线为 Pi SDK 1.0；包版本以 manifest 为准，运行时 SDK 版本从实际 Host 读取。
 
 ## 出处与用途
 
@@ -43,6 +43,8 @@ pi-CAW 由 [TohmaN233/codex-agents-workflow](https://github.com/TohmaN233/codex-
 ## 加载与首次使用
 
 需要提供 `@earendil-works/pi-coding-agent`、`@earendil-works/pi-ai` 兼容接口的 Pi Host，以及 Node.js 22.19 或更新版本。在本仓库目录中：
+
+SDK 加载支持发行包和 TypeScript 源码布局，校验当前 SDK/AI 入口，让原生 MCP 模块来自同一份目录，并将绑定传入 detached 子进程。特殊 Host 可显式绑定重定位的模块和加载器。详见 [SDK 运行时绑定](docs/SDK-RUNTIME.md)。
 
 ```powershell
 # 只为本次 Pi 启动加载扩展

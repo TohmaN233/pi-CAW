@@ -18,6 +18,7 @@ import { DEFAULT_PROVIDER_SLOTS, BUILTIN_ROLE_DEFAULTS, DEFAULT_ROUTING } from '
 import { SEMANTIC_BLUEPRINT_CONTRACT } from '../core/authoring/blueprint-contract.mjs';
 import { sourceSectionInventory } from '../core/skill-import/source-dispositions.mjs';
 import { reviewIds } from '../core/skill-import/review-checklist.mjs';
+import { sourceRuntimeFixture } from './sdk-runtime-fixtures.mjs';
 
 async function until(read, accepts, ms = 15000) {
   const deadline = Date.now() + ms; let last;
@@ -123,8 +124,9 @@ test('the exact terminal notification is queued before revocation and its delive
   }
 });
 
-test('actual detached Pi worker completes a child and original-chat Main, preserves evidence and awaits human acceptance', { timeout: 30000 }, async t => {
+for (const sourceOnly of [false, true]) test(`actual detached Pi worker (${sourceOnly ? 'source tree with stale dist' : 'distribution'}) completes a child and original-chat Main, preserves evidence and awaits human acceptance`, { timeout: 30000 }, async t => {
   const root = await mkdtemp(join(tmpdir(), 'pi-caw-detached-pi-'));
+  const activeSdk = sourceOnly ? (await sourceRuntimeFixture(root, { sdk, aiEntry: import.meta.resolve('@earendil-works/pi-ai/compat'), stale: true })).sdk : sdk;
   const agentDir = join(root, 'agent'), cwd = join(root, 'workspace'), directory = join(root, 'state');
   await mkdir(agentDir); await mkdir(cwd);
   await writeFile(join(agentDir, 'settings.json'), JSON.stringify({ packages: [], retry: { enabled: false } }));
@@ -147,7 +149,7 @@ export const provider=fixture.provider;
   let session, service, runId;
   const context = { cwd, modelRegistry: registry, scopedModels: [], sessionManager: manager, model: parentFaux.getModel(),
     thinkingLevel: 'off', isProjectTrusted: () => false, abort: () => { void session.abort(); } };
-  const host = new PiSdkHost({ sdk, Type: ai.Type, supportedThinking: ai.getSupportedThinkingLevels, agentDir,
+  const host = new PiSdkHost({ sdk: activeSdk, Type: ai.Type, supportedThinking: ai.getSupportedThinkingLevels, agentDir,
     getContext: () => context, detachedNativeProviderModules: [pathToFileURL(fixtureModule).href],
     deliverMain: prompt => { void session.prompt(prompt).catch(error => errors.push({ message: error.message })); } });
   const loader = new sdk.DefaultResourceLoader({ cwd, agentDir, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,

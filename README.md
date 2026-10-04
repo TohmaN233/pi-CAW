@@ -2,7 +2,7 @@
 
 English | [简体中文](README.zh-CN.md)
 
-An independent Pi Agents Workflow plugin, adapted from Codex Agents Workflow 1.1.1 with Main worker/orchestration modes and Host-controlled bounded loops. Current package version: **0.2.30**. The Host adapter targets Pi SDK 1.0 and reads the actual SDK version from the running Host.
+An independent Pi Agents Workflow plugin, adapted from Codex Agents Workflow 1.1.1 with Main worker/orchestration modes and Host-controlled bounded loops. Current package version: **0.3.0**. The Host adapter targets Pi SDK 1.0 and reads the actual SDK version from the running Host.
 
 ## Origin and purpose
 
@@ -52,6 +52,8 @@ First initialization retains **seven portable Roles, two Host authoring Workflow
 ## Installation and first use
 
 Requires Node.js 22.19 or newer and a Pi Host providing compatible `@earendil-works/pi-coding-agent` and `@earendil-works/pi-ai` interfaces.
+
+SDK loading supports distribution and TypeScript source layouts. It identifies the active SDK/AI entries, keeps native MCP modules in the same tree, and carries those bindings into detached workers. Hosts can explicitly bind relocated modules and loader hooks. See [SDK runtime bindings](docs/SDK-RUNTIME.md).
 
 ```powershell
 # Install from GitHub

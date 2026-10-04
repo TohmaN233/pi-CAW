@@ -14,7 +14,7 @@
 | `task.abort()/close()` | 停止并等待所属执行器收敛；Main 只停止该 dispatch，不销毁当前聊天 |
 | `releaseTask()/close()` | 收回 child/SDK 资源，关闭失败必须可见 |
 | `runtimeMetadata()` | 从注入 SDK 读取版本及来源 |
-| `detachedBootstrap(providerIds)` | 交付准确 SDK/agent/workspace、captured catalog、声明式 Provider 配置和 MCP registry；函数式 native Provider 必须有显式可信 module |
+| `detachedBootstrap(providerIds)` | 异步交付准确 SDK/AI 模块入口与 loader hooks、agent/workspace、captured catalog、声明式 Provider 配置和 MCP registry；函数式 native Provider 必须有显式可信 module |
 | `discoverSkills(workspace)` | 读取当前 Pi `getCommands()` 的真实 Skill source metadata；其他目录使用 folder discovery |
 | `mcpCatalog()` | 读取 Pi native 配置及 extension 注册，输出启用状态、namespace、exposure 和 scope 的安全 metadata |
 | `capabilities` | 当前真实 Pi adapter 提供 `detached_owner:true`、`process_sandbox:false`；独立生命周期与 OS sandbox 是不同能力 |
@@ -55,7 +55,7 @@ WSL 是可选 passthrough；默认本机执行不会自动切换。启动 Run �
 
 ## Native MCP
 
-`loadNativeMcpCatalog` 使用 Pi 的 `loadMcpServerConfig` 和 extension `getMcpServers()`，尊重 project trust、原 namespace、server exposure 与 tool exposure。私有配置留在 native catalog 内，模型只收到安全 metadata。它不包含插件自建的 MCP client/凭证协议。
+`loadNativeMcpCatalog` 使用 Pi 的 `loadMcpConfig` 和 extension `getMcpServers()`，尊重 project trust、原 namespace、server exposure 与 tool exposure。优先使用 SDK 公开的 MCP helpers；未公开时从校验过的当前入口目录加载同一份源码或编译模块。Host 可通过 `pi-caw:sdk-runtime` 绑定重定位模块，详见 [SDK runtime bindings](SDK-RUNTIME.md)。私有配置留在 native catalog 内，模型只收到安全 metadata。它不包含插件自建的 MCP client/凭证协议。
 
 Cooperative child 在无明确 subset 时可使用当前启用的 native catalog；Strict child 只加载声明的 server subset。Host 创建 Pi 的 native MCP/search/codemode extension factories，等待必需服务器实际 ready 后再提交模型 prompt。缺少或隐藏的 server、namespace 冲突、连接失败和 OAuth 要求均为可见错误。Child 登录和配置操作交给父 Pi 会话的 `/mcp`，随后显式重试；不会在 child 内打开登录窗口或写 server 配置。
 

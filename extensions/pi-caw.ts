@@ -62,7 +62,10 @@ export default function piCaw(pi: ExtensionAPI) {
     context = ctx;
     if (service) return service;
     const agentDir = sdk.getAgentDir();
-    const host = new PiSdkHost({ sdk, Type, supportedThinking: getSupportedThinkingLevels,
+    const runtimeRequest: { binding?: Record<string, unknown>; error?: Error } = {};
+    pi.events.emit('pi-caw:sdk-runtime', runtimeRequest);
+    if (runtimeRequest.error) throw runtimeRequest.error;
+    const host = new PiSdkHost({ sdk, Type, supportedThinking: getSupportedThinkingLevels, runtimeBinding: runtimeRequest.binding,
       agentDir, getContext: () => ({ ...context, thinkingLevel: pi.getThinkingLevel() }), getCommands: () => pi.getCommands(),
       getMcpServers: () => pi.getMcpServers(), getAllTools: () => pi.getAllTools(),
       workflowScope: (sessionId: string, catalog: unknown[]) => {

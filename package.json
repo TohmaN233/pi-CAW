@@ -1,10 +1,15 @@
 {
   "name": "pi-caw",
-  "version": "0.2.30",
+  "version": "0.3.0",
   "license": "MIT",
-  "repository": { "type": "git", "url": "https://github.com/TohmaN233/pi-CAW.git" },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TohmaN233/pi-CAW.git"
+  },
   "homepage": "https://github.com/TohmaN233/pi-CAW#readme",
-  "bugs": { "url": "https://github.com/TohmaN233/pi-CAW/issues" },
+  "bugs": {
+    "url": "https://github.com/TohmaN233/pi-CAW/issues"
+  },
   "description": "pi-CAW: reusable Roles, Workflows and journaled Runs for Pi hosts",
   "type": "module",
   "keywords": [
