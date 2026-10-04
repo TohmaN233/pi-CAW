@@ -1,6 +1,6 @@
 ---
 name: pi-caw
-description: Route Pi tasks to Ready Workflows, delegate bounded work through enabled Roles, and create or manage Workflows with caw.
+description: Route concrete Pi tasks to Ready Workflows, automatically delegate useful work in ordinary tasks through enabled, model-bound Roles without requiring users to name a Role, and create or manage Workflows with caw.
 ---
 
 # Pi Workflows and Roles
@@ -9,10 +9,12 @@ Call the `caw` tool as `{action: "operation", args: {...}}`. Below, `caw operati
 
 ## Choose a route
 
+When pi-CAW is enabled, proactively use enabled, model-bound Roles for useful delegation during ordinary tasks; the user need not mention Roles.
+
 - For a concrete execution task, call `caw route` with `task`. Run a clear Ready match; ask when alternatives materially differ in outcome or permissions.
 - If the Host already supplies a Workflow revision or node packet, use it directly.
 - If no Workflow fits and a helper is useful, call `caw role_templates`, select one enabled Role, fetch it with `caw role_template`, then use `caw launch_role`. Give the helper its task, owned files, constraints and checks. Preserve its configured binding and inspect the returned work.
-- For planning, comparison or audit, work directly without starting a Run.
+- For planning, comparison or audit, do not start a Workflow Run; you may still use a suitable Role.
 - To create, import or edit a Workflow, follow [editing](references/editing.md).
 
 ## Run the task
