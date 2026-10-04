@@ -1,0 +1,12 @@
+import { useContext, useState } from 'react';
+import { api, Field, ProviderField, Select, FormValidContext, uid, useLocale, type Json } from './shared';
+export function BuildWorkflowPanel({ providers, act, busy, built, back }: { providers: Json[], act: (work: () => Promise<any>) => void, busy: number, built: (pack: Json) => Promise<void>, back: () => void }) {
+  const t = useLocale(), valid = useContext(FormValidContext);
+  const [id, setId] = useState(() => uid('workflow')), [name, setName] = useState(''), [brief, setBrief] = useState('');
+  const [kind, setKind] = useState('workflow'), [provider, setProvider] = useState(''), [access, setAccess] = useState('bounded_write');
+  return <main className="detail-page scroll"><span className="eyebrow">{t('从说明构建', 'Build from a brief')}</span><h1>{t('把流程说明变为可编辑草稿', 'Turn a process brief into an editable draft')}</h1><p>{t('先固定你提供的原始说明与版本，再审阅生成的图。创建来源草稿不会调用模型；自动规划和独立审核由你明确启动。', 'Pin your original process brief and its revision, then inspect the generated graph. Creating a source draft does not call a model; you explicitly start automatic planning and independent review.')}</p>
+    <Select label={t('模板类型', 'Template kind')} value={kind} options={[{ value: 'workflow', label: 'Workflow' }, { value: 'role', label: 'Role' }]} onChange={setKind}/><Field label="ID" value={id} onChange={setId}/><Field label={t('名称', 'Name')} value={name} onChange={setName}/><Field label={kind === 'role' ? t('角色职责、触发条件与指令', 'Role responsibilities, triggers, and instructions') : t('流程步骤、约束、产物与验收要求', 'Process steps, constraints, artifacts, and acceptance requirements')} value={brief} multiline onChange={setBrief}/>
+    <ProviderField label={t('初始草稿执行者', 'Source draft executor')} providers={providers} main={kind === 'workflow'} value={provider} emptyLabel={t('尚未绑定子 Agent', 'Child Agent unbound')} onChange={setProvider}/>{kind === 'role' && <Select label={t('访问权限', 'Access')} value={access} options={['read_only', 'bounded_write']} onChange={setAccess}/>}
+    <div className="actions"><button className="primary" disabled={busy > 0 || !valid || !name.trim() || !id.trim() || !brief.trim()} onClick={() => act(async () => built(await api('build_workflow', { workflow_id: id.trim(), name: name.trim(), brief, template_kind: kind, ...(provider && provider !== '$main' ? { provider_id: provider } : {}), ...(kind === 'role' ? { access } : {}) })))}>{t('固定来源并创建草稿', 'Pin source and create draft')}</button><button disabled={busy > 0} onClick={back}>{t('返回流程库', 'Back to library')}</button></div>
+  </main>;
+}

@@ -1,0 +1,83 @@
+{
+  "proposal": {
+    "contract": "workflow-semantic-blueprint/v6",
+    "purpose": "Create a fictional documentation artifact.",
+    "source_dispositions": [],
+    "requirement_assignments": [],
+    "runtime_dependencies": [],
+    "records": [],
+    "lists": [],
+    "enums": [],
+    "activities": [
+      {
+        "key": "context",
+        "profile": "tool",
+        "instructions": "Resolve synthetic inputs.",
+        "inputs": [
+          {
+            "name": "task",
+            "from": "input:task"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "context",
+            "kind": "text",
+            "type_ref": "",
+            "values": []
+          }
+        ],
+        "tool": "",
+        "source_sections": [
+          "section_01_overview"
+        ]
+      },
+      {
+        "key": "author_bundle",
+        "profile": "worker_write",
+        "instructions": "Create a fictional document.",
+        "inputs": [
+          {
+            "name": "task",
+            "from": "input:task"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "files",
+            "kind": "list",
+            "type_ref": "",
+            "values": [],
+            "optional": true
+          }
+        ],
+        "tool": "",
+        "source_sections": [
+          "section_01_overview"
+        ]
+      }
+    ],
+    "approvals": [],
+    "sequences": [],
+    "parallels": [],
+    "choices": [],
+    "inputs": [],
+    "types": [
+      {
+        "name": "source_reference",
+        "kind": "record",
+        "fields": [
+          {
+            "name": "sha256",
+            "kind": "string"
+          }
+        ]
+      }
+    ],
+    "controls": [],
+    "continuation": {
+      "mode": "future_run"
+    },
+    "uncertainties": []
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "instructions": "Classify each task by its responsibility and choose the matching Pi Agent slot. Configure each slot with a Pi model and thinking level before use. Preserve a separate reviewer for independent review; routing never grants permissions.",
+  "selection_mode": "automatic",
+  "routes": {
+    "implementation": { "provider_id": "pi-worker", "role": "implementer" },
+    "complex_implementation": { "provider_id": "pi-specialist", "role": "implementer" },
+    "review": { "provider_id": "pi-reviewer", "role": "reviewer" },
+    "planning": { "provider_id": "pi-specialist", "role": "implementer" }
+  },
+  "generation": {
+    "planner_provider_id": "pi-specialist",
+    "review_provider_id": "pi-reviewer",
+    "max_rounds": 4
+  }
+}

@@ -1,0 +1,55 @@
+{
+  "contract": "workflow-semantic-blueprint/v6",
+  "purpose": "Create a fictional documentation artifact.",
+  "source_dispositions": [
+    {
+      "section_id": "section_01_overview",
+      "disposition": "workflow",
+      "activity_keys": [
+        "revise"
+      ],
+      "note": "Revise a fictional document."
+    }
+  ],
+  "requirement_assignments": [
+    {
+      "requirement_id": "observed_approval_12",
+      "activity_keys": [
+        "revise"
+      ]
+    }
+  ],
+  "runtime_dependencies": [],
+  "records": [],
+  "lists": [],
+  "enums": [],
+  "activities": [
+    {
+      "key": "revise",
+      "profile": "worker_write",
+      "instructions": "Read the existing document and change only the requested wording. Preserve unchanged content. Choose a new descriptive relative .md filename beneath sources/ and write the complete revised document there. The sole semantic output, path, is this independently invented destination filename for the artifact you created. Do not return copied input paths, identifiers or hashes.",
+      "inputs": [
+        {
+          "name": "task",
+          "from": "input:task"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "path",
+          "kind": "text",
+          "type_ref": "",
+          "values": []
+        }
+      ],
+      "tool": "",
+      "source_sections": [
+        "section_01_overview"
+      ]
+    }
+  ],
+  "approvals": [],
+  "sequences": [],
+  "parallels": [],
+  "choices": []
+}

@@ -1,0 +1,62 @@
+{
+  "name": "pi-caw",
+  "version": "0.2.30",
+  "private": true,
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/TohmaN233/pi-CAW.git" },
+  "homepage": "https://github.com/TohmaN233/pi-CAW#readme",
+  "bugs": { "url": "https://github.com/TohmaN233/pi-CAW/issues" },
+  "description": "pi-CAW: reusable Roles, Workflows and journaled Runs for Pi hosts",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "workflow"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/pi-caw.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": ">=1.0.0"
+  },
+  "scripts": {
+    "audit:publication": "node scripts/audit-publication.mjs",
+    "test": "node --test test/*.test.mjs web-src/authoring-presentation.test.mjs",
+    "check": "node scripts/check.mjs",
+    "smoke:pi-own": "node scripts/smoke-pi-own.mjs && node scripts/smoke-current-main.mjs && node scripts/smoke-native-mcp.mjs",
+    "smoke:native": "node scripts/smoke-native-pi.mjs && node scripts/smoke-native-loops.mjs && node scripts/smoke-pi-own.mjs && node scripts/smoke-current-main.mjs && node scripts/smoke-native-mcp.mjs",
+    "build:web": "node scripts/build-workflow-web.mjs",
+    "check:web": "tsc -p web-src/tsconfig.json && node scripts/build-workflow-web.mjs --check"
+  },
+  "files": [
+    "extensions",
+    "lib",
+    "core",
+    "defaults",
+    "web",
+    "skills",
+    "docs",
+    "examples",
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "devDependencies": {
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.7",
+    "@xyflow/react": "12.11.6",
+    "esbuild": "0.28.2",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "typescript": "5.9.3"
+  }
+}

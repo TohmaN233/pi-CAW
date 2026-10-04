@@ -1,0 +1,16 @@
+pi-CAW
+
+Independent Pi adaptation of Codex Agents Workflow:
+https://github.com/TohmaN233/codex-agents-workflow
+
+The reusable workflow core, Workbench, templates and authoring contracts derive
+from that project. Imported revisions and later upstream features are recorded
+in docs/upstream.json. Pi adapters and subsequent changes are maintained in this
+separate repository:
+https://github.com/TohmaN233/pi-CAW
+
+The original MIT license and copyright notice are retained in LICENSE.
+Bundled third-party frontend license notices are retained in
+web/workflows.LICENSE.txt and the compiled frontend's inline notices.
+
+Pi SDK dependencies are supplied by the Pi host and are not vendored here.

@@ -1,0 +1,78 @@
+{
+  "contract": "workflow-semantic-blueprint/v6",
+  "purpose": "Create a fictional documentation artifact.",
+  "source_dispositions": [
+    {
+      "section_id": "section_01_overview",
+      "disposition": "workflow",
+      "activity_keys": [
+        "author_bundle"
+      ],
+      "note": "Create one fictional document."
+    },
+    {
+      "section_id": "section_06_provenance",
+      "disposition": "workflow",
+      "activity_keys": [],
+      "note": "Unmapped source for a negative provenance test."
+    }
+  ],
+  "requirement_assignments": [
+    {
+      "requirement_id": "fixture_output",
+      "activity_keys": [
+        "author_bundle"
+      ]
+    }
+  ],
+  "runtime_dependencies": [],
+  "records": [
+    {
+      "key": "NewFile",
+      "fields": [
+        {
+          "name": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "open": false
+    }
+  ],
+  "lists": [
+    {
+      "key": "NewFiles",
+      "item_type": "NewFile"
+    }
+  ],
+  "enums": [],
+  "activities": [
+    {
+      "key": "author_bundle",
+      "profile": "worker_write",
+      "instructions": "Write a new documentation file under sources/. Return newly chosen relative file paths for the artifacts you created. Do not copy existing paths, identifiers or hashes.",
+      "inputs": [
+        {
+          "name": "task",
+          "from": "input:task"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "files",
+          "kind": "list",
+          "type_ref": "NewFiles",
+          "values": []
+        }
+      ],
+      "tool": "",
+      "source_sections": [
+        "section_01_overview"
+      ]
+    }
+  ],
+  "approvals": [],
+  "sequences": [],
+  "parallels": [],
+  "choices": []
+}

@@ -1,0 +1,11 @@
+node_modules/
+.artifacts/
+.pi/
+*.tgz
+.env
+.env.local
+.env.*.local
+auth.json
+models.json
+*.jsonl
+.learning-harness-data/

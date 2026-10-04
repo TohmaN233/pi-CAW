@@ -1,0 +1,37 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { build } from 'esbuild';
+import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { join, dirname, resolve, sep } from 'node:path';
+import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
+
+test('Pi browser transport uses only authenticated loopback envelope and fails visibly', async t => {
+  const root = dirname(dirname(fileURLToPath(import.meta.url)));
+  const directory = await mkdtemp(join(tmpdir(), 'pi-caw-transport-'));
+  t.after(async () => { assert.ok(resolve(directory).startsWith(resolve(tmpdir()) + sep), 'Temporary UI test cleanup must remain inside the temp root'); await rm(directory, { recursive: true, force: true }); });
+  const output = await build({ absWorkingDir: root, entryPoints: ['web-src/pi-client.ts'], bundle: true, platform: 'node', format: 'cjs', write: false });
+  const previousWindow = globalThis.window, previousFetch = globalThis.fetch;
+  t.after(() => { if (previousWindow === undefined) delete globalThis.window; else globalThis.window = previousWindow; globalThis.fetch = previousFetch; });
+  const scrubbed = [];
+  globalThis.window = { location: { hash: '#tab-secret', pathname: '/', search: '?workflow_id=example' }, history: { replaceState(...args) { scrubbed.push(args); } } };
+  const modulePath = join(directory, 'authenticated.cjs'); await writeFile(modulePath, output.outputFiles[0].contents);
+  const client = createRequire(import.meta.url)(modulePath);
+  assert.equal(client.token, 'tab-secret'); assert.equal(scrubbed[0][2], '/?workflow_id=example');
+  assert.equal(client.getInitialAppRoute().workflowId, 'example');
+  let request;
+  globalThis.fetch = async (path, options) => { request = { path, options }; return { ok: true, json: async () => ({ result: { models: [] } }) }; };
+  assert.deepEqual(await client.requestPi('models'), { models: [] });
+  assert.equal(request.path, '/api'); assert.equal(request.options.headers.authorization, 'Bearer tab-secret');
+  assert.deepEqual(JSON.parse(request.options.body), { operation: 'models', args: {} });
+  globalThis.fetch = async () => ({ ok: false, status: 409, json: async () => ({ error: 'Settings changed', code: 'REVISION_CONFLICT', details: { expected_revision: 'r1' } }) });
+  await assert.rejects(client.requestPi('save_settings', {}), error => error.code === 'REVISION_CONFLICT' && error.detail.expected_revision === 'r1');
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({}) });
+  await assert.rejects(client.requestPi('models'), /invalid API response/);
+  globalThis.window = { location: { hash: '', pathname: '/', search: '' }, history: { replaceState() {} } };
+  const unboundPath = join(directory, 'unbound.cjs'); await writeFile(unboundPath, output.outputFiles[0].contents);
+  const unbound = createRequire(import.meta.url)(unboundPath);
+  globalThis.fetch = async () => assert.fail('missing credentials must never call the API');
+  await assert.rejects(unbound.requestPi('models'), /no credentials/);
+});

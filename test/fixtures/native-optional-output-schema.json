@@ -1,0 +1,60 @@
+{
+  "type": "object",
+  "required": [
+    "documentDraft",
+    "files"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "documentDraft": {
+      "type": "object",
+      "required": [
+        "title"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "title": {
+          "type": "string"
+        }
+      }
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "format",
+          "path"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "format": {
+            "type": "string",
+            "enum": [
+              "md",
+              "html"
+            ]
+          },
+          "path": {
+            "type": "string"
+          },
+          "documentKind": {
+            "type": "string",
+            "enum": [
+              "documentation"
+            ]
+          },
+          "expectedPages": {
+            "type": "integer"
+          },
+          "outputMode": {
+            "type": "string",
+            "enum": [
+              "render"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

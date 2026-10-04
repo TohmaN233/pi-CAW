@@ -1,0 +1,94 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { build } from 'esbuild';
+import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { join, dirname, resolve, sep } from 'node:path';
+import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
+import { canvasIssues, toCanvas, moveNode, connectNodes, removeElements } from '../web-src/graph-adapter.mjs';
+
+const root = dirname(dirname(fileURLToPath(import.meta.url)));
+const workflow = { id: 'example', name: 'Example', enabled: true, skill_policy: { mode: 'cooperative' }, finalization: { required: true, node_id: 'final' }, requirements: {}, nodes: [{ id: 'start', type: 'start' }, { id: 'child', type: 'agent', role: 'implementer', executor: { kind: 'provider', provider_id: '' }, prompt_template: 'Implement', extension: { preserved: true } }, { id: 'final', type: 'agent', role: 'finalizer', executor: { kind: 'main' }, prompt_template: 'Review' }], edges: [{ id: 'a', source: 'start', target: 'child' }, { id: 'b', source: 'child', target: 'final' }] };
+
+test('visual graph edits preserve open IR, explicit positions, bindings and edge semantics', () => {
+  const original = structuredClone(workflow);
+  const graph = toCanvas(workflow, { child: { status: 'blocked' } });
+  assert.equal(graph.nodes.find(node => node.id === 'child').data.status, 'blocked');
+  assert.deepEqual(workflow, original, 'display layout does not edit the workflow');
+  const moved = moveNode(workflow, 'child', { x: 100, y: 200 });
+  assert.deepEqual(moved.nodes[1].extension, { preserved: true });
+  assert.equal(moved.nodes[1].executor.provider_id, '');
+  assert.deepEqual(moved.nodes[1].ui.position, { x: 100, y: 200 });
+  const connected = connectNodes(moved, 'start', 'final', 'new-edge');
+  assert.equal(connected.edges.at(-1).on, 'success');
+  const removed = removeElements(connected, ['child']);
+  assert.deepEqual(removed.edges.map(edge => edge.id), ['new-edge']);
+  assert.throws(() => moveNode(workflow, 'child', { x: NaN, y: 0 }));
+  assert.throws(() => connectNodes(workflow, 'missing', 'final', 'invalid'));
+  assert.ok(canvasIssues({ ...workflow, edges: [{ id: 'bad', source: 'missing', target: 'final' }] }).length);
+});
+
+test('React inspector and Pi settings render real fields while child model and thinking stay unbound', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'pi-caw-frontend-'));
+  t.after(async () => { assert.ok(resolve(directory).startsWith(resolve(tmpdir()) + sep), 'Temporary UI test cleanup must remain inside the temp root'); await rm(directory, { recursive: true, force: true }); });
+  const output = await build({ absWorkingDir: root, bundle: true, platform: 'node', format: 'cjs', write: false, jsx: 'automatic', stdin: { resolveDir: root, loader: 'tsx', contents: `import React from 'react'; import {renderToStaticMarkup} from 'react-dom/server'; import {BindingPicker,PiSettings} from './web-src/pi-settings'; import {Inspector} from './web-src/inspector'; import {BuildWorkflowPanel} from './web-src/build-workflow-panel'; import {RoleActions} from './web-src/role-actions'; import {AttemptEvidence,NodeAttemptActions,HostWorkerEvidence,RecheckedAuthoringReviewAction} from './web-src/run-panel'; export const workerEvidence = props => renderToStaticMarkup(<HostWorkerEvidence {...props}/>); export const retainedReview = props => renderToStaticMarkup(<RecheckedAuthoringReviewAction {...props}/>); export const attemptEvidence = props => renderToStaticMarkup(<AttemptEvidence {...props}/>); export const attemptActions = props => renderToStaticMarkup(<NodeAttemptActions {...props}/>); export const buildBrief = props => renderToStaticMarkup(<BuildWorkflowPanel {...props}/>); export const roleActions = props => renderToStaticMarkup(<RoleActions {...props}/>); export const binding = props => renderToStaticMarkup(<BindingPicker {...props}/>); export const settings = props => renderToStaticMarkup(<PiSettings {...props}/>); export const inspector = props => renderToStaticMarkup(<Inspector {...props}/>);` } });
+  const modulePath = join(directory, 'frontend.cjs'); await writeFile(modulePath, output.outputFiles[0].contents);
+  const previous = globalThis.window;
+  globalThis.window = { location: { hash: '', pathname: '/', search: '' }, history: { replaceState() {} }, navigator: { language: 'en' }, localStorage: { getItem() { return 'en'; }, setItem() {} }, addEventListener() {} };
+  t.after(() => { if (previous === undefined) delete globalThis.window; else globalThis.window = previous; });
+  const render = createRequire(import.meta.url)(modulePath);
+  const models = [{ provider: 'pi', model_id: 'sample', name: 'Sample', thinking_levels: ['off', 'high'] }];
+  const unbound = render.binding({ models, binding: null, change() {} });
+  assert.match(unbound, /value="" selected="">Unbound/);
+  assert.doesNotMatch(unbound, /value="pi\/sample" selected/);
+  const chosenModel = render.binding({ models, binding: { provider: 'pi', model_id: 'sample', thinking: '' }, change() {} });
+  assert.match(chosenModel, /value="" selected="">Choose thinking/);
+  assert.doesNotMatch(chosenModel, /value="(?:off|high)" selected/);
+  assert.match(render.binding({ models, binding: { provider: 'other', model_id: 'gone', thinking: 'high' }, change() {} }), /role="alert"/);
+  const props = { workflow, providers: [{ id: 'configured', name: 'Configured', enabled: true }], change() {}, select() {}, inline() {} };
+  const child = render.inspector({ ...props, selection: { kind: 'node', id: 'child' } });
+  assert.match(child, /Task instruction \/ template/);
+  assert.match(child, /value="" selected="">Select an option/);
+  assert.doesNotMatch(child, /value="configured" selected/);
+  const main = render.inspector({ ...props, selection: { kind: 'node', id: 'final' } });
+  assert.match(main, /value="main_worker" selected="">Main worker · isolated session/);
+  assert.match(main, /Main orchestration · current conversation/);
+  assert.doesNotMatch(main, /Fixed provider|Thinking \(explicit/);
+  const orchestrationGraph=structuredClone(workflow);orchestrationGraph.nodes.find(node=>node.id==='final').executor.mode='orchestration';
+  const orchestration=render.inspector({...props,workflow:orchestrationGraph,selection:{kind:'node',id:'final'}});
+  assert.match(orchestration,/value="main_orchestration" selected=""/);assert.match(orchestration,/requires Cooperative/);assert.doesNotMatch(orchestration,/Fixed provider|Thinking \(explicit/);
+  const buildBrief=render.buildBrief({providers:[],act(){},busy:0,built(){},back(){}});
+  assert.match(buildBrief,/Process steps, constraints, artifacts, and acceptance requirements/);
+  assert.match(buildBrief,/Pin source and create draft/);
+  assert.match(buildBrief,/value="" selected="">Child Agent unbound/);
+  const roleActions=render.roleActions({roleId:'test-role',act(){}});
+  assert.match(roleActions,/Compile role instructions/);
+  assert.match(roleActions,/Context, constraints, and verification/);
+  assert.match(roleActions,/Launch this Role/);
+
+  const attempt={id:'exact-attempt',owner:'pi-session-exact',started_at:'2026-10-01T00:00:00Z',finished_at:'2026-10-01T00:00:10Z',dispatch:{cancellation_pending:true},executor_events:[{kind:'session_state',metadata:{status:'closing'}}]};
+  const evidence=render.attemptEvidence({current:{attempts:[attempt]}});
+  assert.match(evidence,/Attempt duration:.*10/); assert.match(evidence,/Session shutdown is unconfirmed/); assert.match(evidence,/pi-session-exact/); assert.match(evidence,/Recent executor activity and session state/);
+  const recover=props=>render.attemptActions({node:{id:'worker',executor:{kind:'provider'}},busy:false,valid:true,reconciliation:{},action(){},onRun(){},...props});
+  assert.match(recover({current:{status:'interrupted',attempts:[{id:'claim'}]}}),/Recover the original undispatched attempt/);
+  assert.match(recover({current:{status:'interrupted',attempts:[attempt]}}),/Verify and recover the original session/);
+  const childRecovery=recover({node:{id:'child',executor:{kind:'subworkflow'}},current:{status:'interrupted',attempts:[{...attempt,child_run_id:'exact-child'}]}});
+  assert.match(childRecovery,/Reattach the original child Run/); assert.match(childRecovery,/Collect child Run acceptance result/);
+  const workerEvidence=render.workerEvidence({worker:{status:'attention',session_id:'durable-owner-session',process_id:42,
+    settled_at:'2026-10-02T00:00:00Z',error:{code:'PI_MCP_LOGIN_REQUIRED',message:'Sign in with /mcp in the parent Pi conversation.'}}});
+  assert.match(workerEvidence,/role="alert"/);assert.match(workerEvidence,/PI_MCP_LOGIN_REQUIRED/);
+  assert.match(workerEvidence,/Sign in with \/mcp in the parent Pi conversation/);assert.match(workerEvidence,/durable-owner-session/);
+  const hash='a'.repeat(64),savedAttempt={status:'failed',error:{code:'GENERATION_REVIEW_REJECTED'},result_proposal:{sha256:hash},dispatch:{receipt:{}},executor_events:[{kind:'session_state',metadata:{status:'closed'}}]};
+  const retainedProps={state:{generation_repair:{feedback:{code:'GENERATION_CHECKLIST_INVALID'}},nodes:{final:{status:'ready',attempts:[savedAttempt]}}},
+    pack:{provenance:{kind:'authoring_workflow_run',source_revision:'exact-source'}},proposal:{proposal_sha256:hash,completion:{summary:'Saved verified review'}},accepted:false,setAccepted(){},busy:false,valid:true,action(){}};
+  const retained=render.retainedReview(retainedProps);
+  assert.match(retained,/Revalidate and accept the retained reviewer result/);assert.match(retained,/Saved verified review/);assert.match(retained,new RegExp(hash));
+  assert.match(retained,/<button class="primary" disabled=""/);
+  assert.doesNotMatch(render.retainedReview({...retainedProps,accepted:true}),/<button class="primary" disabled=""/);
+  assert.equal(render.retainedReview({...retainedProps,proposal:{proposal_sha256:'b'.repeat(64)}}),'');
+  const settings = render.settings({ configuration: { revision: 'r1', models, settings: { schema_version: 1, providers: [{ id: 'worker', name: 'Worker', enabled: true, binding: null }], roles: [{ id: 'reviewer', name: 'Reviewer', enabled: true, provider_id: null, access: 'read_only', prompt: 'Review independently', description: 'Fresh review', source_metadata: { source_provider_id: 'source-reference' } }], routing: {} } }, busy: 0, act() {}, reload() {}, onDirty() {} });
+  assert.match(settings, /Review independently/);
+  assert.match(settings, /source-reference/);
+  assert.match(settings, /value="" selected="">Unbound/);
+});

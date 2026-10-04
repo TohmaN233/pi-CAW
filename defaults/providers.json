@@ -1,0 +1,54 @@
+[
+  {
+    "id": "pi-worker",
+    "name": "Pi Agent · worker slot",
+    "enabled": true,
+    "binding": null,
+    "description": "Bounded implementation and routine focused tasks.",
+    "requires_user_approval": false,
+    "capabilities": {
+      "read": true,
+      "write": true,
+      "background": true
+    }
+  },
+  {
+    "id": "pi-reviewer",
+    "name": "Pi Agent · reviewer slot",
+    "enabled": true,
+    "binding": null,
+    "description": "Independent review and verification.",
+    "requires_user_approval": false,
+    "capabilities": {
+      "read": true,
+      "write": true,
+      "background": true
+    }
+  },
+  {
+    "id": "pi-specialist",
+    "name": "Pi Agent · specialist slot",
+    "enabled": true,
+    "binding": null,
+    "description": "Judgment-heavy implementation, planning and difficult analysis.",
+    "requires_user_approval": false,
+    "capabilities": {
+      "read": true,
+      "write": true,
+      "background": true
+    }
+  },
+  {
+    "id": "pi-cross-review",
+    "name": "Pi Agent · cross-review slot",
+    "enabled": true,
+    "binding": null,
+    "description": "Additional independent review through an explicitly bound Pi model.",
+    "requires_user_approval": false,
+    "capabilities": {
+      "read": true,
+      "write": true,
+      "background": true
+    }
+  }
+]

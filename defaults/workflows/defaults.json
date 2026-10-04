@@ -1,0 +1,1304 @@
+[
+  {
+    "workflow": {
+      "schema_version": 1,
+      "context_projection_version": 2,
+      "id": "system.skill2workflow",
+      "name": "Skill to Workflow",
+      "enabled": true,
+      "status": "ready",
+      "revision": 1,
+      "description": "Convert one pinned Skill snapshot into a reviewed editable Workflow Draft. Source capture, deterministic compilation and publication remain Host-owned.",
+      "tags": [
+        "builtin",
+        "authoring",
+        "system.skill2workflow",
+        "skill"
+      ],
+      "template_kind": "workflow",
+      "inputs_schema": {
+        "type": "object",
+        "required": [
+          "source_workflow_id",
+          "source_revision"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "source_workflow_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "source_revision": {
+            "type": "string",
+            "minLength": 64,
+            "maxLength": 64,
+            "pattern": "^[a-f0-9]+$"
+          }
+        }
+      },
+      "outputs_schema": {},
+      "skill_policy": {
+        "mode": "cooperative",
+        "implicit": "allow",
+        "ambient_allow": [],
+        "shadowed_skill_paths": []
+      },
+      "host_automation": {
+        "version": 1,
+        "lifecycle": "host_managed",
+        "agent_submission": "semantic_values_only",
+        "finite_choices": "host_form"
+      },
+      "requirements": {
+        "providers": [
+          "pi-specialist",
+          "pi-reviewer"
+        ],
+        "tools": [
+          "read_workflow_resource",
+          "authoring-graph-assembly",
+          "authoring-execution-binding",
+          "authoring-deterministic-validation"
+        ],
+        "mcp_servers": [],
+        "executables": []
+      },
+      "finalization": {
+        "required": true,
+        "node_id": "final"
+      },
+      "nodes": [
+        {
+          "id": "start",
+          "type": "start",
+          "name": "Host-pinned source snapshot"
+        },
+        {
+          "type": "agent",
+          "access": "read_only",
+          "approval": {
+            "required": false
+          },
+          "input_bindings": {},
+          "resources": [],
+          "id": "expand",
+          "name": "Fill semantic node inventory",
+          "role": "implementer",
+          "executor": {
+            "kind": "provider",
+            "provider_id": "pi-specialist"
+          },
+          "retry": {
+            "max_attempts": 10
+          },
+          "outputs_schema": {},
+          "prompt_template": "Read analysis/request.txt sequentially with read_workflow_resource_chunk, starting at byte 0 and following next_byte until complete. Follow its source, observations and semantic guide; return exactly {\"proposal\":...} using workflow-semantic-blueprint/v6. Preserve required behavior, methods and review/approval boundaries; the Host projects source-defined artifact destinations. Use the packet's responsibility-handoff rule to choose activity boundaries. Declare compact, verifiable outputs and explicit successor inputs; source headings alone do not define stages. Ordinary sequential activities use Main with fresh isolated context; select workers for required delegation, concurrency or Provider choice, and review for independent inspection. Assign deterministic work once to available registered tools, including within mixed semantic phases. Generated activities start from supplied entrypoints and cited sections, expand reads for unresolved dependencies, and preserve conditional context/setup. Carry large artifacts by path and identity. Write-capable activities own creation and repair; required boolean success uses fail_on_false. Preserve future-Run questions and repeatable feedback with renewed validation/approval, without invented limits. Cite source sections instead of repeating prose. The Host owns graph mechanics and execution contracts. On repair, return only stable-key changes for supplied semantic findings. Do not execute the source task. For each source-grounded executable needed to execute the Workflow, use runtime_dependencies with a portable name, any source-required version/Python modules, responsible activities, source section and exact pinned quote. Mark unconditional, conditional, or artifact_only from the actual task timing; cite an explicit trigger for the latter two. Do not invent a dependency from the current host or a broad library catalog. Host prepares unconditional dependencies before task work, so do not add an activity solely to discover, check, install or relay them. Keep project initialization that changes task artifacts in its real semantic activity. When code analysis hands precise locations to a later implementation or review activity, select host_validation workspace_source_locations on a plain list output; bind that output explicitly as the successor input and tell the successor how to use it. Follow the shared workspace_source_locations contract in the packet for path, hash, range, optional literal symbol and usage. The Host attaches the same contract to marked nodes at execution and validates before handoff. Select this only where the downstream activity needs source locations; retain ordinary type_ref outputs elsewhere. Do not create a location-only model stage, auto-scan the repository or copy large source excerpts between activities. Bind existing upstream artifacts and verified source locations into successor inputs when they can replace repeated discovery. If a successor depends on prior code analysis, pass its concise technical conclusions and why they matter alongside exact source locations and artifact identity; a filename list alone does not convey those decisions. When the structured upstream result is already bound, do not copy that result into the successor task text too. Do not add an analysis activity where the task has no such dependency. When a Host tool has verified and projected needed source material, bind that projection directly into the consumer input so the consumer need not copy hashes or derive the same source rows by hand; retain references for deeper reads when needed. Successors begin from those handoffs, read further only when needed, and repair only invalid work while preserving valid outputs. Keep source-required parallelism and isolated worker ownership. Select fanout result_mode per_item only when the source requires successful items in a batch to remain accepted while failed items are repaired. Agent outputs contain only information first created by that Agent. Existing IDs, paths, hashes, checksums, tokens, indices, revisions, receipts, timestamps and protocol status flow directly from Workflow inputs or registered Host-tool outputs into their consumers. Never ask an Agent to transcribe those fields. The deterministic compiler rejects unchecked transcription; workspace_source_locations remains only for source locations that the Agent discovers and the Host validates. This prohibition also applies to every unchanged pre-existing input or resource value, regardless of its field name or representation, and to free-text evidence and review findings. Never ask an Agent to copy, transcribe, relay, re-emit or pass through supplied records, labels, names, source text, metadata, item IDs, artifact paths, hashes or other existing values. Return only newly created semantic results in input order and bind the originals beside them downstream, or use a registered Host tool to copy, transform or join them mechanically. Decide from the source whether rejection by a later review must return to upstream implementation or integration. If required, declare a structured bounded loop with semantic activity keys, a fresh read-only review exit, max_rounds and typed until acceptance; repeat_until is only a local node or transport retry and cannot implement downstream semantic repair. Keep the body and outer graph acyclic, single-entry/single-exit and closed; final acceptance stays outside. Do not add loops to workflows whose source has no semantic repair requirement. Loop inputs use loop:key.feedback, round, review_items or repair_items; the Host owns runtime identities and immutable round histories. Item-scoped loops bind original Host items, positional exit verdicts and their artifact paths/dependencies fields. Repair receives only Host materialized failed items with new findings; review receives originals, including accepted items affected by changed dependencies. Exit verdicts contain only accepted boolean and newly written findings in supplied order, with no copied IDs or metadata. The first round reviews all originals and skips an empty repair pool, so exit review must consume initial artifact evidence or Host review_items instead of a mandatory repair output. Exhaustion fails visibly. Return loops explicitly with [] when none is required. Omit unused empty collections, activity inputs/outputs/tool and output values/type_ref placeholders when they have no meaning. The Host materializes these empty fields visibly. Do not omit actual types, evidence, dependency decisions or source-required behavior. A loop exit may use main_read with fresh isolated worker context, worker_read, worker_complex_read or review; independence does not require a different Provider unless the source explicitly says so. Invalid submissions receive the shared compiler diagnostics in this same node turn; correct the indicated fields before resubmitting."
+        },
+        {
+          "id": "graph_assembly",
+          "type": "tool",
+          "name": "Verify Host graph assembly",
+          "access": "read_only",
+          "executor": {
+            "kind": "tool",
+            "tool": "authoring-graph-assembly"
+          },
+          "approval": {
+            "required": false
+          },
+          "retry": {
+            "max_attempts": 1
+          },
+          "input_bindings": {
+            "evidence": "/nodes/expand/output/host_pipeline/results/graph_assembly"
+          },
+          "resources": [],
+          "outputs_schema": {
+            "type": "object"
+          }
+        },
+        {
+          "id": "execution_binding",
+          "type": "tool",
+          "name": "Verify Host execution binding",
+          "access": "read_only",
+          "executor": {
+            "kind": "tool",
+            "tool": "authoring-execution-binding"
+          },
+          "approval": {
+            "required": false
+          },
+          "retry": {
+            "max_attempts": 1
+          },
+          "input_bindings": {
+            "evidence": "/nodes/expand/output/host_pipeline/results/execution_binding",
+            "previous": "/nodes/graph_assembly/output"
+          },
+          "resources": [],
+          "outputs_schema": {
+            "type": "object"
+          }
+        },
+        {
+          "id": "deterministic_validation",
+          "type": "tool",
+          "name": "Verify Host deterministic validation",
+          "access": "read_only",
+          "executor": {
+            "kind": "tool",
+            "tool": "authoring-deterministic-validation"
+          },
+          "approval": {
+            "required": false
+          },
+          "retry": {
+            "max_attempts": 1
+          },
+          "input_bindings": {
+            "evidence": "/nodes/expand/output/host_pipeline/results/deterministic_validation",
+            "previous": "/nodes/execution_binding/output"
+          },
+          "resources": [],
+          "outputs_schema": {
+            "type": "object"
+          }
+        },
+        {
+          "type": "agent",
+          "access": "read_only",
+          "approval": {
+            "required": false
+          },
+          "input_bindings": {},
+          "resources": [],
+          "id": "final",
+          "name": "Independent authoring review",
+          "role": "finalizer",
+          "executor": {
+            "kind": "main"
+          },
+          "authoring_reviewer_provider_id": "pi-reviewer",
+          "retry": {
+            "max_attempts": 3
+          },
+          "outputs_schema": {},
+          "prompt_template": "Read __authoring__/review-proposal.json and analysis/review-request.txt completely with read_workflow_resource_chunk: start each at byte 0, use max_bytes 12000 and follow each next_byte until complete. Read __authoring__/review-inputs-schema.json once with read_workflow_resource. Review the canonical proposal against the full source, Host observations and the ordered shared checklist in the review request. Return exactly one verdict for every checklist entry in that displayed order. Each verdict contains only status (pass, fail or not_applicable) and concise newly written semantic evidence. The Host binds checklist identity, graph entities and source evidence after collection. Do not return, quote or reproduce checklist IDs, node or edge IDs, requirement or section IDs, paths, hashes, spans, line numbers, tokens, indices, revisions, receipts, source text or other supplied fields. Describe the actual semantic defect and smallest correction in your own words. Only checks whose stated contract permits not_applicable may use it. Audit source coverage, responsibility boundaries, data handoffs, approvals, failure semantics, dependency timing, method fidelity, artifact interfaces, validation strength and Host projection. Report all material findings in one pass. Do not repair the graph or declare approval; the Host computes the verdict and keeps the result as a Draft for human acceptance. Preserve failure ownership: when the Host's observed requirement classification or generated completion gate contradicts its own source evidence, begin the failure evidence with \"Host projection defect:\". A semantic planner assigns observed IDs but cannot change their typed facts or generated artifact gates. A conditional dependency's responsible activity can be a shared registered Host tool when that tool performs the effect; inspect its retained runtime guard and source trigger. Attachment to a shared node does not promote a conditional dependency into unconditional startup preparation. Do not move an executable to an Author merely to make the graph branch-specific when the executable is used by the guarded Host effect. After the required packets, read __authoring__/review-facts.json once. These compact facts bind the exact canonical proposal hash, actual disjoint node evidence and condition domains; they do not decide semantic approval. A validated producer's required finite enum rejects unknown or missing values before a condition. A default arm can therefore represent the remaining declared valid enum value without admitting unknown values; inspect the actual remaining domain rather than assuming an open-ended catch-all. A node resource grants access to a whole file but does not cite every line as evidence. Source spans may cover a complete selected section, and disjoint ranges do not imply an umbrella range. Judge whether the actual cited sections support their consumer. Wrong semantic selection belongs to its semantic check; do not request Host span edits when the canonical ranges are already disjoint and correct. Verify source-required downstream semantic rejection is implemented by actual structured loops, not prose or repeat_until local retry. Check bounded rounds, a closed acyclic body, declared feedback handoffs, fresh read-only exit review and final acceptance outside. For item repair, verify positional semantic verdicts, original item bindings, Host failed-item materialization and artifact/dependency revision invalidation; accepted siblings must not be repaired merely because another item failed. Review-only invalidation of changed accepted items must remain possible. Initial empty repair bypass must leave required exit review inputs available. Fail missing, unbounded or misrepresented source-required loops; do not demand a loop where the source requires none. Treat absent empty collections and unused output placeholders as their Host-normalized empty values. Do not require a Provider change for independent review: a fresh isolated Main worker is valid unless the source explicitly requires another Provider. Continue to reject write-capable, continued-task or orchestration exit reviewers. Negative semantic findings are valid review data and enter the existing repair loop; malformed verdicts must be corrected in this same node turn."
+        },
+        {
+          "id": "end",
+          "type": "end",
+          "name": "Human publication boundary"
+        }
+      ],
+      "edges": [
+        {
+          "id": "start-expand",
+          "source": "start",
+          "target": "expand"
+        },
+        {
+          "id": "expand-graph_assembly",
+          "source": "expand",
+          "target": "graph_assembly"
+        },
+        {
+          "id": "graph_assembly-execution_binding",
+          "source": "graph_assembly",
+          "target": "execution_binding"
+        },
+        {
+          "id": "execution_binding-deterministic_validation",
+          "source": "execution_binding",
+          "target": "deterministic_validation"
+        },
+        {
+          "id": "deterministic_validation-final",
+          "source": "deterministic_validation",
+          "target": "final"
+        },
+        {
+          "id": "final-end",
+          "source": "final",
+          "target": "end"
+        }
+      ],
+      "authoring": {
+        "contract": "pi-caw-authoring-workflow/v31",
+        "source_kind": "skill",
+        "source_adapter": "skill_snapshot",
+        "seed_operation": "import_skill",
+        "semantic_contract": "workflow-semantic-blueprint/v6",
+        "repair_contract": "workflow-semantic-repair/v1",
+        "mechanical_owner": "host",
+        "planner_provider_id": "pi-specialist",
+        "review_provider_id": "pi-reviewer",
+        "max_rounds": 4,
+        "user_guided_continuation": true,
+        "pipeline": {
+          "contract": "pi-caw-authoring-pipeline/v1",
+          "stages": [
+            {
+              "id": "start",
+              "phase": "source_snapshot",
+              "owner": "host",
+              "kind": "start"
+            },
+            {
+              "id": "expand",
+              "phase": "semantic_inventory",
+              "owner": "planner",
+              "kind": "agent",
+              "access": "read_only"
+            },
+            {
+              "id": "graph_assembly",
+              "phase": "graph_assembly",
+              "owner": "host",
+              "kind": "tool",
+              "access": "read_only"
+            },
+            {
+              "id": "execution_binding",
+              "phase": "execution_binding",
+              "owner": "host",
+              "kind": "tool",
+              "access": "read_only"
+            },
+            {
+              "id": "deterministic_validation",
+              "phase": "deterministic_validation",
+              "owner": "host",
+              "kind": "tool",
+              "access": "read_only"
+            },
+            {
+              "id": "final",
+              "phase": "semantic_review",
+              "owner": "reviewer",
+              "kind": "agent",
+              "access": "read_only"
+            },
+            {
+              "id": "end",
+              "phase": "human_publish",
+              "owner": "human",
+              "kind": "end"
+            }
+          ],
+          "edges": [
+            {
+              "source": "start",
+              "target": "expand"
+            },
+            {
+              "source": "expand",
+              "target": "graph_assembly"
+            },
+            {
+              "source": "graph_assembly",
+              "target": "execution_binding"
+            },
+            {
+              "source": "execution_binding",
+              "target": "deterministic_validation"
+            },
+            {
+              "source": "deterministic_validation",
+              "target": "final"
+            },
+            {
+              "source": "final",
+              "target": "end"
+            }
+          ],
+          "repair": {
+            "from": [
+              "deterministic_validation",
+              "final"
+            ],
+            "target": "expand",
+            "mode": "stable_key_delta",
+            "automatic_rounds": 3,
+            "after_exhaustion": "user_guided_delta"
+          }
+        }
+      },
+      "host_tools": [
+        {
+          "id": "authoring-graph-assembly",
+          "identity": {
+            "name": "authoring-graph-assembly",
+            "version": "1.0.0",
+            "sha256": "927b770c37fa3daabbb0d3da7f4a015c65464c6ea4ede6f76db0773e4b76ea1a"
+          },
+          "argv": [
+            "authoring-graph-assembly"
+          ],
+          "input_schema": {
+            "type": "object",
+            "required": [
+              "evidence"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "evidence": {
+                "type": "object",
+                "required": [
+                  "stage",
+                  "proposal_hash",
+                  "result"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "stage": {
+                    "type": "string",
+                    "enum": [
+                      "graph_assembly"
+                    ]
+                  },
+                  "proposal_hash": {
+                    "type": "string",
+                    "minLength": 64,
+                    "maxLength": 64,
+                    "pattern": "^[a-f0-9]+$"
+                  },
+                  "result": {
+                    "type": "object"
+                  }
+                }
+              }
+            }
+          },
+          "output_schema": {
+            "type": "object",
+            "required": [
+              "stage",
+              "proposal_hash",
+              "result"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "stage": {
+                "type": "string",
+                "enum": [
+                  "graph_assembly"
+                ]
+              },
+              "proposal_hash": {
+                "type": "string",
+                "minLength": 64,
+                "maxLength": 64,
+                "pattern": "^[a-f0-9]+$"
+              },
+              "result": {
+                "type": "object"
+              }
+            }
+          },
+          "env_allow": [],
+          "permissions": {
+            "network": false,
+            "read_paths": [],
+            "write_paths": []
+          },
+          "output_cap_bytes": 32768,
+          "deadline_ms": 10000,
+          "idempotency": {
+            "mode": "safe"
+          }
+        },
+        {
+          "id": "authoring-execution-binding",
+          "identity": {
+            "name": "authoring-execution-binding",
+            "version": "1.0.0",
+            "sha256": "435681891647144ad72da158a9450c39e5643492ec98344795f5ba3b1aafcc05"
+          },
+          "argv": [
+            "authoring-execution-binding"
+          ],
+          "input_schema": {
+            "type": "object",
+            "required": [
+              "evidence",
+              "previous"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "evidence": {
+                "type": "object",
+                "required": [
+                  "stage",
+                  "proposal_hash",
+                  "result"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "stage": {
+                    "type": "string",
+                    "enum": [
+                      "execution_binding"
+                    ]
+                  },
+                  "proposal_hash": {
+                    "type": "string",
+                    "minLength": 64,
+                    "maxLength": 64,
+                    "pattern": "^[a-f0-9]+$"
+                  },
+                  "result": {
+                    "type": "object"
+                  }
+                }
+              },
+              "previous": {
+                "type": "object",
+                "required": [
+                  "stage",
+                  "proposal_hash",
+                  "result"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "stage": {
+                    "type": "string",
+                    "enum": [
+                      "graph_assembly"
+                    ]
+                  },
+                  "proposal_hash": {
+                    "type": "string",
+                    "minLength": 64,
+                    "maxLength": 64,
+                    "pattern": "^[a-f0-9]+$"
+                  },
+                  "result": {
+                    "type": "object"
+                  }
+                }
+              }
+            }
+          },
+          "output_schema": {
+            "type": "object",
+            "required": [
+              "stage",
+              "proposal_hash",
+              "result"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "stage": {
+                "type": "string",
+                "enum": [
+                  "execution_binding"
+                ]
+              },
+              "proposal_hash": {
+                "type": "string",
+                "minLength": 64,
+                "maxLength": 64,
+                "pattern": "^[a-f0-9]+$"
+              },
+              "result": {
+                "type": "object"
+              }
+            }
+          },
+          "env_allow": [],
+          "permissions": {
+            "network": false,
+            "read_paths": [],
+            "write_paths": []
+          },
+          "output_cap_bytes": 32768,
+          "deadline_ms": 10000,
+          "idempotency": {
+            "mode": "safe"
+          }
+        },
+        {
+          "id": "authoring-deterministic-validation",
+          "identity": {
+            "name": "authoring-deterministic-validation",
+            "version": "1.0.0",
+            "sha256": "ff2e7e653b9ee1ba6f86170129d8a4c009b64f5136457d8965e38c29774f7bcd"
+          },
+          "argv": [
+            "authoring-deterministic-validation"
+          ],
+          "input_schema": {
+            "type": "object",
+            "required": [
+              "evidence",
+              "previous"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "evidence": {
+                "type": "object",
+                "required": [
+                  "stage",
+                  "proposal_hash",
+                  "result"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "stage": {
+                    "type": "string",
+                    "enum": [
+                      "deterministic_validation"
+                    ]
+                  },
+                  "proposal_hash": {
+                    "type": "string",
+                    "minLength": 64,
+                    "maxLength": 64,
+                    "pattern": "^[a-f0-9]+$"
+                  },
+                  "result": {
+                    "type": "object"
+                  }
+                }
+              },
+              "previous": {
+                "type": "object",
+                "required": [
+                  "stage",
+                  "proposal_hash",
+                  "result"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "stage": {
+                    "type": "string",
+                    "enum": [
+                      "execution_binding"
+                    ]
+                  },
+                  "proposal_hash": {
+                    "type": "string",
+                    "minLength": 64,
+                    "maxLength": 64,
+                    "pattern": "^[a-f0-9]+$"
+                  },
+                  "result": {
+                    "type": "object"
+                  }
+                }
+              }
+            }
+          },
+          "output_schema": {
+            "type": "object",
+            "required": [
+              "stage",
+              "proposal_hash",
+              "result"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "stage": {
+                "type": "string",
+                "enum": [
+                  "deterministic_validation"
+                ]
+              },
+              "proposal_hash": {
+                "type": "string",
+                "minLength": 64,
+                "maxLength": 64,
+                "pattern": "^[a-f0-9]+$"
+              },
+              "result": {
+                "type": "object"
+              }
+            }
+          },
+          "env_allow": [],
+          "permissions": {
+            "network": false,
+            "read_paths": [],
+            "write_paths": []
+          },
+          "output_cap_bytes": 32768,
+          "deadline_ms": 10000,
+          "idempotency": {
+            "mode": "safe"
+          }
+        }
+      ]
+    },
+    "resources": {},
+    "provenance": {
+      "kind": "bundled_authoring_workflow",
+      "authoring_workflow_id": "system.skill2workflow",
+      "builtin_contract": "pi-caw-authoring-workflow/v31",
+      "builtin_prompt_bases": {
+        "planner": {
+          "sha256": "75159a7228d09060e1f75e640293f9dc48b259d646eb973e07f0a5da90cbeca7",
+          "length": 6899
+        },
+        "reviewer": {
+          "sha256": "7b012fd9fe31883250bb71135e59b91c534b4f3d895b2c3e21f555ffc4d9ebd7",
+          "length": 4301
+        }
+      }
+    },
+    "import_report": {}
+  },
+  {
+    "workflow": {
+      "schema_version": 1,
+      "context_projection_version": 2,
+      "id": "system.build-workflow",
+      "name": "Build Workflow",
+      "enabled": true,
+      "status": "ready",
+      "revision": 1,
+      "description": "Build a reviewed editable Workflow Draft from one pinned brief. Source capture, deterministic compilation and publication remain Host-owned.",
+      "tags": [
+        "builtin",
+        "authoring",
+        "system.build-workflow",
+        "brief"
+      ],
+      "template_kind": "workflow",
+      "inputs_schema": {
+        "type": "object",
+        "required": [
+          "source_workflow_id",
+          "source_revision"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "source_workflow_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "source_revision": {
+            "type": "string",
+            "minLength": 64,
+            "maxLength": 64,
+            "pattern": "^[a-f0-9]+$"
+          }
+        }
+      },
+      "outputs_schema": {},
+      "skill_policy": {
+        "mode": "cooperative",
+        "implicit": "allow",
+        "ambient_allow": [],
+        "shadowed_skill_paths": []
+      },
+      "host_automation": {
+        "version": 1,
+        "lifecycle": "host_managed",
+        "agent_submission": "semantic_values_only",
+        "finite_choices": "host_form"
+      },
+      "requirements": {
+        "providers": [
+          "pi-specialist",
+          "pi-reviewer"
+        ],
+        "tools": [
+          "read_workflow_resource",
+          "authoring-graph-assembly",
+          "authoring-execution-binding",
+          "authoring-deterministic-validation"
+        ],
+        "mcp_servers": [],
+        "executables": []
+      },
+      "finalization": {
+        "required": true,
+        "node_id": "final"
+      },
+      "nodes": [
+        {
+          "id": "start",
+          "type": "start",
+          "name": "Host-pinned source snapshot"
+        },
+        {
+          "type": "agent",
+          "access": "read_only",
+          "approval": {
+            "required": false
+          },
+          "input_bindings": {},
+          "resources": [],
+          "id": "expand",
+          "name": "Fill semantic node inventory",
+          "role": "implementer",
+          "executor": {
+            "kind": "provider",
+            "provider_id": "pi-specialist"
+          },
+          "retry": {
+            "max_attempts": 10
+          },
+          "outputs_schema": {},
+          "prompt_template": "Read analysis/request.txt sequentially with read_workflow_resource_chunk, starting at byte 0 and following next_byte until complete. Follow its source, observations and semantic guide; return exactly {\"proposal\":...} using workflow-semantic-blueprint/v6. Preserve required behavior, methods and review/approval boundaries; the Host projects source-defined artifact destinations. Use the packet's responsibility-handoff rule to choose activity boundaries. Declare compact, verifiable outputs and explicit successor inputs; source headings alone do not define stages. Ordinary sequential activities use Main with fresh isolated context; select workers for required delegation, concurrency or Provider choice, and review for independent inspection. Assign deterministic work once to available registered tools, including within mixed semantic phases. Generated activities start from supplied entrypoints and cited sections, expand reads for unresolved dependencies, and preserve conditional context/setup. Carry large artifacts by path and identity. Write-capable activities own creation and repair; required boolean success uses fail_on_false. Preserve future-Run questions and repeatable feedback with renewed validation/approval, without invented limits. Cite source sections instead of repeating prose. The Host owns graph mechanics and execution contracts. On repair, return only stable-key changes for supplied semantic findings. Do not execute the source task. For each source-grounded executable needed to execute the Workflow, use runtime_dependencies with a portable name, any source-required version/Python modules, responsible activities, source section and exact pinned quote. Mark unconditional, conditional, or artifact_only from the actual task timing; cite an explicit trigger for the latter two. Do not invent a dependency from the current host or a broad library catalog. Host prepares unconditional dependencies before task work, so do not add an activity solely to discover, check, install or relay them. Keep project initialization that changes task artifacts in its real semantic activity. When code analysis hands precise locations to a later implementation or review activity, select host_validation workspace_source_locations on a plain list output; bind that output explicitly as the successor input and tell the successor how to use it. Follow the shared workspace_source_locations contract in the packet for path, hash, range, optional literal symbol and usage. The Host attaches the same contract to marked nodes at execution and validates before handoff. Select this only where the downstream activity needs source locations; retain ordinary type_ref outputs elsewhere. Do not create a location-only model stage, auto-scan the repository or copy large source excerpts between activities. Bind existing upstream artifacts and verified source locations into successor inputs when they can replace repeated discovery. If a successor depends on prior code analysis, pass its concise technical conclusions and why they matter alongside exact source locations and artifact identity; a filename list alone does not convey those decisions. When the structured upstream result is already bound, do not copy that result into the successor task text too. Do not add an analysis activity where the task has no such dependency. When a Host tool has verified and projected needed source material, bind that projection directly into the consumer input so the consumer need not copy hashes or derive the same source rows by hand; retain references for deeper reads when needed. Successors begin from those handoffs, read further only when needed, and repair only invalid work while preserving valid outputs. Keep source-required parallelism and isolated worker ownership. Select fanout result_mode per_item only when the source requires successful items in a batch to remain accepted while failed items are repaired. Agent outputs contain only information first created by that Agent. Existing IDs, paths, hashes, checksums, tokens, indices, revisions, receipts, timestamps and protocol status flow directly from Workflow inputs or registered Host-tool outputs into their consumers. Never ask an Agent to transcribe those fields. The deterministic compiler rejects unchecked transcription; workspace_source_locations remains only for source locations that the Agent discovers and the Host validates. This prohibition also applies to every unchanged pre-existing input or resource value, regardless of its field name or representation, and to free-text evidence and review findings. Never ask an Agent to copy, transcribe, relay, re-emit or pass through supplied records, labels, names, source text, metadata, item IDs, artifact paths, hashes or other existing values. Return only newly created semantic results in input order and bind the originals beside them downstream, or use a registered Host tool to copy, transform or join them mechanically. Decide from the source whether rejection by a later review must return to upstream implementation or integration. If required, declare a structured bounded loop with semantic activity keys, a fresh read-only review exit, max_rounds and typed until acceptance; repeat_until is only a local node or transport retry and cannot implement downstream semantic repair. Keep the body and outer graph acyclic, single-entry/single-exit and closed; final acceptance stays outside. Do not add loops to workflows whose source has no semantic repair requirement. Loop inputs use loop:key.feedback, round, review_items or repair_items; the Host owns runtime identities and immutable round histories. Item-scoped loops bind original Host items, positional exit verdicts and their artifact paths/dependencies fields. Repair receives only Host materialized failed items with new findings; review receives originals, including accepted items affected by changed dependencies. Exit verdicts contain only accepted boolean and newly written findings in supplied order, with no copied IDs or metadata. The first round reviews all originals and skips an empty repair pool, so exit review must consume initial artifact evidence or Host review_items instead of a mandatory repair output. Exhaustion fails visibly. Return loops explicitly with [] when none is required. Omit unused empty collections, activity inputs/outputs/tool and output values/type_ref placeholders when they have no meaning. The Host materializes these empty fields visibly. Do not omit actual types, evidence, dependency decisions or source-required behavior. A loop exit may use main_read with fresh isolated worker context, worker_read, worker_complex_read or review; independence does not require a different Provider unless the source explicitly says so. Invalid submissions receive the shared compiler diagnostics in this same node turn; correct the indicated fields before resubmitting."
+        },
+        {
+          "id": "graph_assembly",
+          "type": "tool",
+          "name": "Verify Host graph assembly",
+          "access": "read_only",
+          "executor": {
+            "kind": "tool",
+            "tool": "authoring-graph-assembly"
+          },
+          "approval": {
+            "required": false
+          },
+          "retry": {
+            "max_attempts": 1
+          },
+          "input_bindings": {
+            "evidence": "/nodes/expand/output/host_pipeline/results/graph_assembly"
+          },
+          "resources": [],
+          "outputs_schema": {
+            "type": "object"
+          }
+        },
+        {
+          "id": "execution_binding",
+          "type": "tool",
+          "name": "Verify Host execution binding",
+          "access": "read_only",
+          "executor": {
+            "kind": "tool",
+            "tool": "authoring-execution-binding"
+          },
+          "approval": {
+            "required": false
+          },
+          "retry": {
+            "max_attempts": 1
+          },
+          "input_bindings": {
+            "evidence": "/nodes/expand/output/host_pipeline/results/execution_binding",
+            "previous": "/nodes/graph_assembly/output"
+          },
+          "resources": [],
+          "outputs_schema": {
+            "type": "object"
+          }
+        },
+        {
+          "id": "deterministic_validation",
+          "type": "tool",
+          "name": "Verify Host deterministic validation",
+          "access": "read_only",
+          "executor": {
+            "kind": "tool",
+            "tool": "authoring-deterministic-validation"
+          },
+          "approval": {
+            "required": false
+          },
+          "retry": {
+            "max_attempts": 1
+          },
+          "input_bindings": {
+            "evidence": "/nodes/expand/output/host_pipeline/results/deterministic_validation",
+            "previous": "/nodes/execution_binding/output"
+          },
+          "resources": [],
+          "outputs_schema": {
+            "type": "object"
+          }
+        },
+        {
+          "type": "agent",
+          "access": "read_only",
+          "approval": {
+            "required": false
+          },
+          "input_bindings": {},
+          "resources": [],
+          "id": "final",
+          "name": "Independent authoring review",
+          "role": "finalizer",
+          "executor": {
+            "kind": "main"
+          },
+          "authoring_reviewer_provider_id": "pi-reviewer",
+          "retry": {
+            "max_attempts": 3
+          },
+          "outputs_schema": {},
+          "prompt_template": "Read __authoring__/review-proposal.json and analysis/review-request.txt completely with read_workflow_resource_chunk: start each at byte 0, use max_bytes 12000 and follow each next_byte until complete. Read __authoring__/review-inputs-schema.json once with read_workflow_resource. Review the canonical proposal against the full source, Host observations and the ordered shared checklist in the review request. Return exactly one verdict for every checklist entry in that displayed order. Each verdict contains only status (pass, fail or not_applicable) and concise newly written semantic evidence. The Host binds checklist identity, graph entities and source evidence after collection. Do not return, quote or reproduce checklist IDs, node or edge IDs, requirement or section IDs, paths, hashes, spans, line numbers, tokens, indices, revisions, receipts, source text or other supplied fields. Describe the actual semantic defect and smallest correction in your own words. Only checks whose stated contract permits not_applicable may use it. Audit source coverage, responsibility boundaries, data handoffs, approvals, failure semantics, dependency timing, method fidelity, artifact interfaces, validation strength and Host projection. Report all material findings in one pass. Do not repair the graph or declare approval; the Host computes the verdict and keeps the result as a Draft for human acceptance. Preserve failure ownership: when the Host's observed requirement classification or generated completion gate contradicts its own source evidence, begin the failure evidence with \"Host projection defect:\". A semantic planner assigns observed IDs but cannot change their typed facts or generated artifact gates. A conditional dependency's responsible activity can be a shared registered Host tool when that tool performs the effect; inspect its retained runtime guard and source trigger. Attachment to a shared node does not promote a conditional dependency into unconditional startup preparation. Do not move an executable to an Author merely to make the graph branch-specific when the executable is used by the guarded Host effect. After the required packets, read __authoring__/review-facts.json once. These compact facts bind the exact canonical proposal hash, actual disjoint node evidence and condition domains; they do not decide semantic approval. A validated producer's required finite enum rejects unknown or missing values before a condition. A default arm can therefore represent the remaining declared valid enum value without admitting unknown values; inspect the actual remaining domain rather than assuming an open-ended catch-all. A node resource grants access to a whole file but does not cite every line as evidence. Source spans may cover a complete selected section, and disjoint ranges do not imply an umbrella range. Judge whether the actual cited sections support their consumer. Wrong semantic selection belongs to its semantic check; do not request Host span edits when the canonical ranges are already disjoint and correct. Verify source-required downstream semantic rejection is implemented by actual structured loops, not prose or repeat_until local retry. Check bounded rounds, a closed acyclic body, declared feedback handoffs, fresh read-only exit review and final acceptance outside. For item repair, verify positional semantic verdicts, original item bindings, Host failed-item materialization and artifact/dependency revision invalidation; accepted siblings must not be repaired merely because another item failed. Review-only invalidation of changed accepted items must remain possible. Initial empty repair bypass must leave required exit review inputs available. Fail missing, unbounded or misrepresented source-required loops; do not demand a loop where the source requires none. Treat absent empty collections and unused output placeholders as their Host-normalized empty values. Do not require a Provider change for independent review: a fresh isolated Main worker is valid unless the source explicitly requires another Provider. Continue to reject write-capable, continued-task or orchestration exit reviewers. Negative semantic findings are valid review data and enter the existing repair loop; malformed verdicts must be corrected in this same node turn."
+        },
+        {
+          "id": "end",
+          "type": "end",
+          "name": "Human publication boundary"
+        }
+      ],
+      "edges": [
+        {
+          "id": "start-expand",
+          "source": "start",
+          "target": "expand"
+        },
+        {
+          "id": "expand-graph_assembly",
+          "source": "expand",
+          "target": "graph_assembly"
+        },
+        {
+          "id": "graph_assembly-execution_binding",
+          "source": "graph_assembly",
+          "target": "execution_binding"
+        },
+        {
+          "id": "execution_binding-deterministic_validation",
+          "source": "execution_binding",
+          "target": "deterministic_validation"
+        },
+        {
+          "id": "deterministic_validation-final",
+          "source": "deterministic_validation",
+          "target": "final"
+        },
+        {
+          "id": "final-end",
+          "source": "final",
+          "target": "end"
+        }
+      ],
+      "authoring": {
+        "contract": "pi-caw-authoring-workflow/v31",
+        "source_kind": "brief",
+        "source_adapter": "brief_snapshot",
+        "seed_operation": "build_workflow",
+        "semantic_contract": "workflow-semantic-blueprint/v6",
+        "repair_contract": "workflow-semantic-repair/v1",
+        "mechanical_owner": "host",
+        "planner_provider_id": "pi-specialist",
+        "review_provider_id": "pi-reviewer",
+        "max_rounds": 4,
+        "user_guided_continuation": true,
+        "pipeline": {
+          "contract": "pi-caw-authoring-pipeline/v1",
+          "stages": [
+            {
+              "id": "start",
+              "phase": "source_snapshot",
+              "owner": "host",
+              "kind": "start"
+            },
+            {
+              "id": "expand",
+              "phase": "semantic_inventory",
+              "owner": "planner",
+              "kind": "agent",
+              "access": "read_only"
+            },
+            {
+              "id": "graph_assembly",
+              "phase": "graph_assembly",
+              "owner": "host",
+              "kind": "tool",
+              "access": "read_only"
+            },
+            {
+              "id": "execution_binding",
+              "phase": "execution_binding",
+              "owner": "host",
+              "kind": "tool",
+              "access": "read_only"
+            },
+            {
+              "id": "deterministic_validation",
+              "phase": "deterministic_validation",
+              "owner": "host",
+              "kind": "tool",
+              "access": "read_only"
+            },
+            {
+              "id": "final",
+              "phase": "semantic_review",
+              "owner": "reviewer",
+              "kind": "agent",
+              "access": "read_only"
+            },
+            {
+              "id": "end",
+              "phase": "human_publish",
+              "owner": "human",
+              "kind": "end"
+            }
+          ],
+          "edges": [
+            {
+              "source": "start",
+              "target": "expand"
+            },
+            {
+              "source": "expand",
+              "target": "graph_assembly"
+            },
+            {
+              "source": "graph_assembly",
+              "target": "execution_binding"
+            },
+            {
+              "source": "execution_binding",
+              "target": "deterministic_validation"
+            },
+            {
+              "source": "deterministic_validation",
+              "target": "final"
+            },
+            {
+              "source": "final",
+              "target": "end"
+            }
+          ],
+          "repair": {
+            "from": [
+              "deterministic_validation",
+              "final"
+            ],
+            "target": "expand",
+            "mode": "stable_key_delta",
+            "automatic_rounds": 3,
+            "after_exhaustion": "user_guided_delta"
+          }
+        }
+      },
+      "host_tools": [
+        {
+          "id": "authoring-graph-assembly",
+          "identity": {
+            "name": "authoring-graph-assembly",
+            "version": "1.0.0",
+            "sha256": "927b770c37fa3daabbb0d3da7f4a015c65464c6ea4ede6f76db0773e4b76ea1a"
+          },
+          "argv": [
+            "authoring-graph-assembly"
+          ],
+          "input_schema": {
+            "type": "object",
+            "required": [
+              "evidence"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "evidence": {
+                "type": "object",
+                "required": [
+                  "stage",
+                  "proposal_hash",
+                  "result"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "stage": {
+                    "type": "string",
+                    "enum": [
+                      "graph_assembly"
+                    ]
+                  },
+                  "proposal_hash": {
+                    "type": "string",
+                    "minLength": 64,
+                    "maxLength": 64,
+                    "pattern": "^[a-f0-9]+$"
+                  },
+                  "result": {
+                    "type": "object"
+                  }
+                }
+              }
+            }
+          },
+          "output_schema": {
+            "type": "object",
+            "required": [
+              "stage",
+              "proposal_hash",
+              "result"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "stage": {
+                "type": "string",
+                "enum": [
+                  "graph_assembly"
+                ]
+              },
+              "proposal_hash": {
+                "type": "string",
+                "minLength": 64,
+                "maxLength": 64,
+                "pattern": "^[a-f0-9]+$"
+              },
+              "result": {
+                "type": "object"
+              }
+            }
+          },
+          "env_allow": [],
+          "permissions": {
+            "network": false,
+            "read_paths": [],
+            "write_paths": []
+          },
+          "output_cap_bytes": 32768,
+          "deadline_ms": 10000,
+          "idempotency": {
+            "mode": "safe"
+          }
+        },
+        {
+          "id": "authoring-execution-binding",
+          "identity": {
+            "name": "authoring-execution-binding",
+            "version": "1.0.0",
+            "sha256": "435681891647144ad72da158a9450c39e5643492ec98344795f5ba3b1aafcc05"
+          },
+          "argv": [
+            "authoring-execution-binding"
+          ],
+          "input_schema": {
+            "type": "object",
+            "required": [
+              "evidence",
+              "previous"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "evidence": {
+                "type": "object",
+                "required": [
+                  "stage",
+                  "proposal_hash",
+                  "result"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "stage": {
+                    "type": "string",
+                    "enum": [
+                      "execution_binding"
+                    ]
+                  },
+                  "proposal_hash": {
+                    "type": "string",
+                    "minLength": 64,
+                    "maxLength": 64,
+                    "pattern": "^[a-f0-9]+$"
+                  },
+                  "result": {
+                    "type": "object"
+                  }
+                }
+              },
+              "previous": {
+                "type": "object",
+                "required": [
+                  "stage",
+                  "proposal_hash",
+                  "result"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "stage": {
+                    "type": "string",
+                    "enum": [
+                      "graph_assembly"
+                    ]
+                  },
+                  "proposal_hash": {
+                    "type": "string",
+                    "minLength": 64,
+                    "maxLength": 64,
+                    "pattern": "^[a-f0-9]+$"
+                  },
+                  "result": {
+                    "type": "object"
+                  }
+                }
+              }
+            }
+          },
+          "output_schema": {
+            "type": "object",
+            "required": [
+              "stage",
+              "proposal_hash",
+              "result"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "stage": {
+                "type": "string",
+                "enum": [
+                  "execution_binding"
+                ]
+              },
+              "proposal_hash": {
+                "type": "string",
+                "minLength": 64,
+                "maxLength": 64,
+                "pattern": "^[a-f0-9]+$"
+              },
+              "result": {
+                "type": "object"
+              }
+            }
+          },
+          "env_allow": [],
+          "permissions": {
+            "network": false,
+            "read_paths": [],
+            "write_paths": []
+          },
+          "output_cap_bytes": 32768,
+          "deadline_ms": 10000,
+          "idempotency": {
+            "mode": "safe"
+          }
+        },
+        {
+          "id": "authoring-deterministic-validation",
+          "identity": {
+            "name": "authoring-deterministic-validation",
+            "version": "1.0.0",
+            "sha256": "ff2e7e653b9ee1ba6f86170129d8a4c009b64f5136457d8965e38c29774f7bcd"
+          },
+          "argv": [
+            "authoring-deterministic-validation"
+          ],
+          "input_schema": {
+            "type": "object",
+            "required": [
+              "evidence",
+              "previous"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "evidence": {
+                "type": "object",
+                "required": [
+                  "stage",
+                  "proposal_hash",
+                  "result"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "stage": {
+                    "type": "string",
+                    "enum": [
+                      "deterministic_validation"
+                    ]
+                  },
+                  "proposal_hash": {
+                    "type": "string",
+                    "minLength": 64,
+                    "maxLength": 64,
+                    "pattern": "^[a-f0-9]+$"
+                  },
+                  "result": {
+                    "type": "object"
+                  }
+                }
+              },
+              "previous": {
+                "type": "object",
+                "required": [
+                  "stage",
+                  "proposal_hash",
+                  "result"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "stage": {
+                    "type": "string",
+                    "enum": [
+                      "execution_binding"
+                    ]
+                  },
+                  "proposal_hash": {
+                    "type": "string",
+                    "minLength": 64,
+                    "maxLength": 64,
+                    "pattern": "^[a-f0-9]+$"
+                  },
+                  "result": {
+                    "type": "object"
+                  }
+                }
+              }
+            }
+          },
+          "output_schema": {
+            "type": "object",
+            "required": [
+              "stage",
+              "proposal_hash",
+              "result"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "stage": {
+                "type": "string",
+                "enum": [
+                  "deterministic_validation"
+                ]
+              },
+              "proposal_hash": {
+                "type": "string",
+                "minLength": 64,
+                "maxLength": 64,
+                "pattern": "^[a-f0-9]+$"
+              },
+              "result": {
+                "type": "object"
+              }
+            }
+          },
+          "env_allow": [],
+          "permissions": {
+            "network": false,
+            "read_paths": [],
+            "write_paths": []
+          },
+          "output_cap_bytes": 32768,
+          "deadline_ms": 10000,
+          "idempotency": {
+            "mode": "safe"
+          }
+        }
+      ]
+    },
+    "resources": {},
+    "provenance": {
+      "kind": "bundled_authoring_workflow",
+      "authoring_workflow_id": "system.build-workflow",
+      "builtin_contract": "pi-caw-authoring-workflow/v31",
+      "builtin_prompt_bases": {
+        "planner": {
+          "sha256": "75159a7228d09060e1f75e640293f9dc48b259d646eb973e07f0a5da90cbeca7",
+          "length": 6899
+        },
+        "reviewer": {
+          "sha256": "7b012fd9fe31883250bb71135e59b91c534b4f3d895b2c3e21f555ffc4d9ebd7",
+          "length": 4301
+        }
+      }
+    },
+    "import_report": {}
+  }
+]

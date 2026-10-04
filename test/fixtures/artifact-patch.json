@@ -1,0 +1,32 @@
+{
+  "contract": "workflow-semantic-repair/v1",
+  "purpose": "",
+  "upsert": {
+    "activities": [
+      {
+        "key": "author_bundle",
+        "profile": "worker_write",
+        "instructions": "Create one new source file. Return newly chosen relative artifact paths only. Do not copy supplied paths, IDs or hashes.",
+        "inputs": [
+          {
+            "name": "task",
+            "from": "input:task"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "files",
+            "kind": "list",
+            "type_ref": "NewFiles",
+            "values": []
+          }
+        ],
+        "tool": "",
+        "source_sections": [
+          "section_01_overview"
+        ]
+      }
+    ]
+  },
+  "remove": {}
+}
