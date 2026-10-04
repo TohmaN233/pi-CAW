@@ -1,7 +1,6 @@
 {
   "name": "pi-caw",
   "version": "0.2.30",
-  "private": true,
   "license": "MIT",
   "repository": { "type": "git", "url": "https://github.com/TohmaN233/pi-CAW.git" },
   "homepage": "https://github.com/TohmaN233/pi-CAW#readme",
