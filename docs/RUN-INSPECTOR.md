@@ -22,6 +22,12 @@ explicit errors. Fan-out receipts retain each actual session identity, and
 retention cleans those exact sessions with existing ownership checks. Continued
 threads remain within the same Run.
 
+Temporary execution JSONL lives in plugin-private `execution-sessions/<run_id>`
+storage, outside Pi's chat session catalog. Retention uses the same exact receipts
+and preserves explicit persistent threads. Independent Role results remain in
+their durable Role journals after successful transcript cleanup; failed or
+uncertain Role transcripts remain available for diagnosis.
+
 Pi delays creating native JSONL until the first assistant reply finishes. Native
 SDK stream phases and tool start/end events therefore journal compact metadata
 while that first reply is pending. The inspector identifies this exact state

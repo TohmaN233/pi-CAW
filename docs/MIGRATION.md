@@ -208,3 +208,9 @@ Private course planner outputs and Skill text were replaced with small fictional
 ## 0.3.0: SDK runtime layout compatibility
 
 Replaces fixed dist/adjacent-peer imports with active SDK/AI entry bindings and a same-tree native MCP adapter. Public MCP exports take precedence; trusted Hosts can supply relocated module entries and local loader hooks. Detached workers receive the exact bindings and verify SDK package identity/version. Source-only and stale-dist fixtures exercise real offline SDK interfaces and detached child/Main execution. See [runtime bindings](SDK-RUNTIME.md).
+
+## 0.3.1: private execution session lifecycle
+
+Temporary SDK workers, including isolated Main, use per-Run `execution-sessions` directories in plugin state rather than the Pi session catalog. Parent Main bridges and detached workers share this storage binding. Durable JSONL remains available for exact recovery and inspection until normal Run retention commits its terminal summary. Successful independent Roles save the result, confirm task closure and retire their transcript through a recoverable hash-bound cleanup intent. Failed and uncertain Roles retain evidence. Explicit threads survive Run cleanup, including old receipts and interrupted historical cleanup intents; the initiating chat remains untouched.
+
+Offline real SDK regressions cover detached isolated Main, Role success/failure, native thread continuation and scoped history listing. Cleanup tests cover durable results, changed bytes, parent-path rejection and interrupted retries. No paid model calls are used.

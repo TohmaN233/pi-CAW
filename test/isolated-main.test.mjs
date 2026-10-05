@@ -104,7 +104,8 @@ test('strict logical Main runs through the real detached owner with fresh Pi con
     assert.notEqual(receipt.thread_id,parent.getSessionId());
     assert.equal(receipt.observed_model.model_id,'selected-main');
     assert.equal(receipt.observed_model.thinking,'off');
-    assert.ok(resolve(receipt.session_file).startsWith(resolve(agentDir)+sep));
+    assert.ok(resolve(receipt.session_file).startsWith(resolve(service.directory,'execution-sessions',runId)+sep));
+    assert.equal(receipt.session_storage,'private');
     const entries=(await readFile(receipt.session_file,'utf8')).trim().split('\n').map(JSON.parse);
     assert.ok(entries.some(row=>row.customType==='pi-caw:task'&&row.data.kind==='isolated_main'));
     assert.ok(entries.some(row=>row.message?.role==='toolResult'&&row.message.toolName==='caw_submit_result'));
@@ -115,4 +116,8 @@ test('strict logical Main runs through the real detached owner with fresh Pi con
   await until(()=>service.detachedOwners.read(runId),value=>value.termination?.confirmed===true);
   assert.equal((await service.runtime.runs.read(runId)).state.status,'succeeded');
   assert.equal(host.tasks.size,0);
+  assert.equal((await sdk.SessionManager.listAll(join(agentDir,'sessions'))).some(item=>receipts.some(r=>r.thread_id===item.id)),false);
+  await service.retention.sweep({completed_now:true});
+  for(const receipt of receipts) await assert.rejects(readFile(receipt.session_file),{code:'ENOENT'});
+  assert.ok(await readFile(parent.getSessionFile(),'utf8'));
 });

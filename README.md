@@ -2,7 +2,7 @@
 
 English | [简体中文](README.zh-CN.md)
 
-An independent Pi Agents Workflow plugin, adapted from Codex Agents Workflow 1.1.1 with Main worker/orchestration modes and Host-controlled bounded loops. Current package version: **0.3.0**. The Host adapter targets Pi SDK 1.0 and reads the actual SDK version from the running Host.
+An independent Pi Agents Workflow plugin, adapted from Codex Agents Workflow 1.1.1 with Main worker/orchestration modes and Host-controlled bounded loops. Current package version: **0.3.1**. The Host adapter targets Pi SDK 1.0 and reads the actual SDK version from the running Host.
 
 ## Origin and purpose
 
@@ -111,6 +111,8 @@ GPT-specific web-review slots and reviewers are excluded. Roles retain prompts, 
 | deterministic tool | Executes the exact registered contract and records inputs, outputs, program and file effects |
 
 Runs retain immutable pins, a hash-chained journal, dispatch intents/receipts, result proposals, session/turn evidence and a cost ledger. Models submit new semantic values only. The Host binds original records, paths, hashes, locations, leases and receipts. Missing billing data is recorded as unknown.
+
+Temporary workers, planners, reviewers and Roles store transcripts privately under `PI_CAW_DIR/execution-sessions`, outside Pi chat history. Run transcripts follow the Run retention policy (24 hours after success by default). Successful independent Roles retire their transcripts after saving the result and closing the task; failed or uncertain Roles retain evidence. Explicit `thread` sessions and the initiating chat remain persistent.
 
 By default, an independent Node owner process receives exact Host bootstrap over IPC and retains authorized child work when the Pi Host closes. Main remains bound to the original Pi chat: if its bridge is unavailable, execution waits at `waiting_parent`; reconnection verifies the same actor. Owners observe journal authority, publish heartbeats and persist terminal records, confirming shutdown after all session/program effects settle.
 

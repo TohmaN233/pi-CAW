@@ -2,14 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile,writeFile,mkdir,readdir} from 'node:fs/promises';
 import {join} from 'node:path';
-import {fixture,workflow,settle} from './fixtures.mjs';
+import {fixture,workflow,settle,agent} from './fixtures.mjs';
 import {runFeedback,feedbackText} from '../lib/run-feedback.mjs';
 import {WorkflowStore} from '../core/workflow-store.mjs';
 import {spawn} from 'node:child_process';
 import {randomUUID} from 'node:crypto';
 
-async function finished(t) {
- const f=await fixture(t);await f.service.call('create_workflow',{workflow:workflow()});
+async function finished(t,graph=workflow()) {
+ const f=await fixture(t);await f.service.call('create_workflow',{workflow:graph});
  const r=await f.service.call('run',{workflow_id:'example',workspace:f.workspace,access:'read_only',inputs:{task:'test'}});
  await settle(f.service,r.run_id);const record=await f.service.runtime.runs.read(r.run_id),a=record.state.nodes.final.attempts.at(-1);
  await f.service.call('accept_final',{run_id:r.run_id,accepted:true,proposal_sha256:a.result_proposal.sha256},{human:true});await settle(f.service,r.run_id);
@@ -55,6 +55,22 @@ test('owned SDK cleanup verifies physical thread rather than logical actor and k
  const file=join(dir,'child.jsonl'),parent=join(dir,'parent.jsonl');await writeFile(file,JSON.stringify({type:'session',id:'physical-child'})+'\n');await writeFile(parent,'parent chat');
  await s.runtime.runs.mutate(f.id,'recover',state=>{const r=state.nodes.work.attempts[0].dispatch.receipt;Object.assign(r,{session_file:file,thread_id:'physical-child',session_id:'logical-parent'});});
  const result=await s.retention.sweep({completed_now:true});assert.equal(result.deleted.length,1);assert.equal(await readFile(parent,'utf8'),'parent chat');await assert.rejects(readFile(file),{code:'ENOENT'});
+});
+test('explicit persistent threads survive Run cleanup, including historical receipts without storage flags',async t=>{
+ const f=await finished(t,workflow([agent('work',{kind:'thread',provider_id:'worker',lifecycle:'start'})])),s=f.service;
+ f.host.agentDir=join(f.root,'agent');const dir=join(f.host.agentDir,'sessions');await mkdir(dir,{recursive:true});
+ const file=join(dir,'thread.jsonl');await writeFile(file,JSON.stringify({type:'session',id:'persistent-thread'})+'\n');
+ await s.runtime.runs.mutate(f.id,'recover',state=>Object.assign(state.nodes.work.attempts[0].dispatch.receipt,{session_file:file,thread_id:'persistent-thread'}));
+ await s.retention.sweep({completed_now:true});
+ assert.ok(await readFile(file,'utf8'));
+});
+test('an interrupted historical cleanup intent cannot delete a native persistent thread',async t=>{
+ const f=await finished(t),s=f.service;f.host.agentDir=join(f.root,'agent');const dir=join(f.host.agentDir,'sessions');await mkdir(dir,{recursive:true});
+ const file=join(dir,'thread.jsonl'),data=Buffer.from([{type:'session',id:'thread'},{type:'custom',customType:'pi-caw:task',data:{kind:'thread'}}].map(JSON.stringify).join('\n')+'\n');
+ await writeFile(file,data);await s.retention.sweep({completed_now:true});
+ const path=join(s.runtime.runs.directory(f.id),'retained.json'),summary=JSON.parse(await readFile(path,'utf8'));
+ const {digest}=await import('../core/workflow-revisions.mjs');summary.cleanup_complete=false;summary.execution_files=[{path:file,sha256:digest(data),bytes:data.length}];
+ await writeFile(path,JSON.stringify(summary));await s.retention.sweep();assert.deepEqual(await readFile(file),data);
 });
 test('a terminal cleanup recovers only an absent writer; orphan failed authoring jobs clean without touching installed workflows',async t=>{
  const f=await finished(t),s=f.service;await s.runtime.runs.mutate(f.id,'fail',state=>{state.status='failed';});

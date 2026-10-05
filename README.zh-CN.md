@@ -2,7 +2,7 @@
 
 [English](README.md) | 简体中文
 
-独立的 Pi Agents Workflow 插件，迁移基线为 Codex Agents Workflow 1.1.1，并吸收其最新 Main worker/orchestration 和 Host 有界循环设计。当前版本为 **0.3.0**，Host 适配基线为 Pi SDK 1.0；包版本以 manifest 为准，运行时 SDK 版本从实际 Host 读取。
+独立的 Pi Agents Workflow 插件，迁移基线为 Codex Agents Workflow 1.1.1，并吸收其最新 Main worker/orchestration 和 Host 有界循环设计。当前版本为 **0.3.1**，Host 适配基线为 Pi SDK 1.0；包版本以 manifest 为准，运行时 SDK 版本从实际 Host 读取。
 
 ## 出处与用途
 
@@ -100,6 +100,8 @@ GPT 专用的 web-review slot 和 GPT reviewer 不纳入 Pi 默认内容。Roles
 | deterministic tool | 执行准确注册的契约，记录输入、输出、程序及文件效果证据 |
 
 Run 保存不可变 pins、哈希链 journal、dispatch intent/receipt、结果提案、真实 session/turn 证据及费用 ledger。模型只提交新语义值；原始记录、路径、哈希、位置、leases 和 receipt 由 Host 绑定。缺失计费信息记为 unknown，不等于零费用。
+
+临时 worker、规划、审核和 Role 的会话记录存入 `PI_CAW_DIR/execution-sessions` 私有目录，不进入 Pi 聊天历史。Run 会话遵循 Run 保留策略，成功后默认保留 24 小时。独立 Role 成功后先保存结果、关闭任务，再清理会话；失败或未确认关闭的 Role 保留证据。显式 `thread` 和发起聊天继续持久保存。
 
 默认 Run 由独立 Node owner process 执行，以 IPC 接收准确 Host bootstrap；Pi Host 关闭后，已授权 child 工作仍由该 owner 持有。Main 始终是原 Pi 聊天：原聊天 bridge 不在时停在 `waiting_parent`，重连验证同一 actor，不创建替代 Main。Owner 监视 journal authority、发布 heartbeat 和持久终止记录，并在所有 session/program effects 确认收敛后才证明停止。
 
