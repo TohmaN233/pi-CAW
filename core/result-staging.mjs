@@ -17,17 +17,19 @@ function stagedError(staged) {
   const error = new Error(`PI_RESULT_STAGED ${staged.id}: ${staged.error} Staged only, not an official result. Top-level keys: ${keysOf(staged.result)}. Do not resend the body. Submit { summary, stage_id: "${staged.id}", patch } only. patch ops: wrap {op,key}, unwrap {op,key}, set {op,path,value}, remove {op,path}, reset. A patch that validates is promoted; reset restores the first staged body.`);
   error.code = 'PI_RESULT_STAGED';
   error.stage_id = staged.id;
+  error.cause = staged.validation_error;
   throw error;
 }
 
 function remember(state, result, summary, error) {
   requireValue(bytes(result) <= RESULT_LIMIT, 'PI_RESULT_SIZE', 'Semantic result exceeds the durable result limit; keep detailed artifacts on disk');
   const body = structuredClone(result);
-  if (!state.staged) state.staged = { id: randomUUID(), base: structuredClone(body), result: body, summary, error: error.message };
+  if (!state.staged) state.staged = { id: randomUUID(), base: structuredClone(body), result: body, summary, error: error.message, validation_error: error };
   else {
     state.staged.result = body;
     state.staged.summary = summary;
     state.staged.error = error.message;
+    state.staged.validation_error = error;
   }
   stagedError(state.staged);
 }
@@ -35,16 +37,23 @@ function remember(state, result, summary, error) {
 function pointer(value, path, { remove = false, next } = {}) {
   requireValue(typeof path === 'string' && /^\/[^/]+(?:\/[^/]+)*$/.test(path) && path.length <= 256, 'PI_RESULT_PATCH', 'Patch path must be a non-root JSON pointer');
   const segments = path.slice(1).split('/');
+  const keyFor=(parent,segment)=>{
+    if(!Array.isArray(parent))return segment;
+    requireValue(/^(0|[1-9][0-9]*)$/.test(segment)&&Number.isSafeInteger(Number(segment))&&Number(segment)<parent.length,
+      'PI_RESULT_PATCH','Patch array index must address an existing bounded element');
+    return Number(segment);
+  };
   let parent = value;
   for (const segment of segments.slice(0, -1)) {
-    requireValue(object(parent) && Object.hasOwn(parent, segment), 'PI_RESULT_PATCH', `Patch path is missing: ${segment}`);
-    parent = parent[segment];
+    const key=keyFor(parent,segment);
+    requireValue((object(parent)||Array.isArray(parent)) && Object.hasOwn(parent, key), 'PI_RESULT_PATCH', `Patch path is missing: ${segment}`);
+    parent = parent[key];
   }
-  const leaf = segments.at(-1);
-  requireValue(object(parent), 'PI_RESULT_PATCH', 'Patch path must address an object property');
+  const leaf = keyFor(parent,segments.at(-1));
+  requireValue(object(parent)||Array.isArray(parent), 'PI_RESULT_PATCH', 'Patch path must address an object property or existing array element');
   if (remove) {
     requireValue(Object.hasOwn(parent, leaf), 'PI_RESULT_PATCH', `Patch path is missing: ${leaf}`);
-    delete parent[leaf];
+    if(Array.isArray(parent))parent.splice(leaf,1);else delete parent[leaf];
     return value;
   }
   parent[leaf] = next;
@@ -103,10 +112,13 @@ export function hostLiftRequiredWrapper(value, schema) {
 // A failed semantic body stays on the task until a small patch validates.
 // A missing required object wrapper is lifted by the host before any model retry.
 export async function acceptSemanticResult(state, params, validate, schema) {
-  requireValue(typeof params?.summary === 'string' && params.summary.length > 0 && params.summary.length <= 4000, 'PI_RESULT_SUMMARY', 'Result requires a bounded summary');
+  const submissionHelp = state.staged
+    ? `The body is retained as stage_id "${state.staged.id}". Submit {summary, stage_id:"${state.staged.id}", patch:[...]} without resending the body; use [{op:"reset"}] to validate the retained original.`
+    : 'No body is staged. Submit {summary:"short summary", result:<semantic value>} in full. Use result, not output. Do not supply stage_id or patch until the Host returns a real stage_id.';
+  requireValue(typeof params?.summary === 'string' && params.summary.length > 0 && params.summary.length <= 4000, 'PI_RESULT_SUMMARY', 'summary must be a nonempty string of at most 4000 characters. ' + submissionHelp);
   const correcting = params.stage_id !== undefined || params.patch !== undefined;
   if (correcting) {
-    requireValue(state.staged && params.stage_id === state.staged.id, 'PI_RESULT_STAGE_MISSING', 'No matching staged result. Do not invent or resend a body.');
+    requireValue(state.staged && params.stage_id === state.staged.id, 'PI_RESULT_STAGE_MISSING', 'No matching staged result. ' + submissionHelp);
     requireValue(params.result === undefined, 'PI_RESULT_STAGE_RESEND', 'Do not resend the staged body. Submit only stage_id and patch.');
     requireValue(Array.isArray(params.patch) && params.patch.length > 0 && params.patch.length <= 8, 'PI_RESULT_PATCH', 'A staged correction needs 1 to 8 patch operations');
     let candidate = structuredClone(state.staged.result);
@@ -118,7 +130,7 @@ export async function acceptSemanticResult(state, params, validate, schema) {
     catch (error) { remember(state, candidate, params.summary, error); }
     return promote(state, candidate, params.summary, true);
   }
-  requireValue(params.result !== undefined, 'PI_RESULT_BODY', 'Submit result once, or a patch against the staged result');
+  requireValue(params.result !== undefined, 'PI_RESULT_BODY', 'The semantic body belongs in result, not output. ' + submissionHelp);
   if (state.staged && [state.staged.result, state.staged.base].some(body => canonicalJSON(body) === canonicalJSON(params.result))) stagedError(state.staged);
   let body = params.result, lifted = false;
   if (schema) {

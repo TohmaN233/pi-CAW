@@ -2,7 +2,7 @@ import { sourceRepairLoopIntentFindings } from '../authoring/semantic-loops.mjs'
 import { requireValue } from '../workflow-paths.mjs';
 import { decodeGeneratedEnvelope, decodeGeneratedProposalDetailed } from './expansion-run.mjs';
 import { canonicalJSON, digest } from '../workflow-revisions.mjs';
-import { projectObservedRequirements } from './source-requirements.mjs';
+import { callableSourceRequirements, projectObservedRequirements } from './source-requirements.mjs';
 import { compileExpansion } from './semantic-expander.mjs';
 import { sourceSectionInventory, validateSourceDispositions } from './source-dispositions.mjs';
 import { applySemanticRepair, canonicalizeSemanticRepair, CURRENT_AUTHORING_SEMANTIC_BLUEPRINT_SCHEMA, INTERNAL_SEMANTIC_BLUEPRINT_SCHEMA, LEGACY_SEMANTIC_BLUEPRINT_CONTRACT, normalizeSemanticBlueprint, PREVIOUS_COMPACT_SEMANTIC_BLUEPRINT_CONTRACT, PREVIOUS_COMPACT_SEMANTIC_BLUEPRINT_SCHEMA, PREVIOUS_FANOUT_SEMANTIC_BLUEPRINT_CONTRACT, PREVIOUS_FANOUT_SEMANTIC_BLUEPRINT_SCHEMA, PREVIOUS_SEMANTIC_BLUEPRINT_CONTRACT, SEMANTIC_BLUEPRINT_CONTRACT, SEMANTIC_BLUEPRINT_SCHEMA, SEMANTIC_REPAIR_CONTRACT, SEMANTIC_REPAIR_SCHEMA } from '../authoring/blueprint-contract.mjs';
@@ -72,6 +72,9 @@ export function deterministicProposalFindings(proposal,compiled,version,resource
 // One deterministic gate shared by pre-review, persisted-artifact recheck and
 // final apply.  No caller may maintain a weaker copy of the conversion rules.
 export function validateGenerationProposal(output,{pack,resources,provenance,context,previousPlan=null,repairFeedback=null}) {
+  requireValue(provenance.callable_inventory_policy===undefined||provenance.callable_inventory_policy==='workflow-callable-inventory/v1','GENERATION_CALLABLE_POLICY','Unknown pinned callable inventory policy');
+  const callableInventoryPolicy=provenance.callable_inventory_policy==='workflow-callable-inventory/v1';
+  context={...context,callable_inventory_policy:callableInventoryPolicy,host_callable_requirements:callableInventoryPolicy?callableSourceRequirements(resources):[]};
   const projectedPipeline=output?.host_pipeline??null;
   const envelope=projectedPipeline?{proposal:output.proposal}:output;
   const payload=decodeGeneratedEnvelope(envelope);
@@ -108,9 +111,9 @@ export function validateGenerationProposal(output,{pack,resources,provenance,con
       if(payload.contract===LEGACY_SEMANTIC_BLUEPRINT_CONTRACT)repairs.push({kind:'host_semantic_blueprint_v2_upgraded'});
       return {proposal,repairs,authoringPlan};
     })()
-    : decodeGeneratedProposalDetailed(envelope,provenance.source_revision,{requirePlanningAnalysis:provenance.routing_rules?.selection_mode === 'automatic',requireSourceDispositions:(provenance.review_contract_version ?? 1)>=8,requireRuntimeDependencies:requireDependencyAssessment,sourceInventory:sourceSectionInventory(resources),preserveExactSchemas:projectedPipeline!==null});
+    : decodeGeneratedProposalDetailed(envelope,provenance.source_revision,{requirePlanningAnalysis:provenance.routing_rules?.selection_mode === 'automatic',requireSourceDispositions:(provenance.review_contract_version ?? 1)>=8,requireRuntimeDependencies:requireDependencyAssessment,sourceInventory:sourceSectionInventory(resources),preserveExactSchemas:projectedPipeline!==null,hostRequirementIds:context.host_callable_requirements.map(item=>item.requirement_id)});
   const decoded=decodedResult.proposal;
-  const proposal=projectObservedRequirements(decoded,resources);
+  const proposal=projectObservedRequirements(decoded,resources,{callable_inventory_policy:callableInventoryPolicy,host_callable_requirements:context.host_callable_requirements});
   const repairs=[...decodedResult.repairs];
   if (canonicalJSON(decoded)!==canonicalJSON(proposal)) repairs.push({kind:'host_contract_projection',fields:['source_requirements','requirement_mappings','required_executables','input_bindings','resource_refs','requirement_ids']});
   const compiled=compileExpansion(pack,resources,proposal,{...context,routing_rules:provenance.routing_rules,routing_catalog:provenance.routing_catalog});

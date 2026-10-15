@@ -1,5 +1,7 @@
 node_modules/
 .artifacts/
+.test-tmp/
+work/.workflow-runtime/
 .pi/
 *.tgz
 .env

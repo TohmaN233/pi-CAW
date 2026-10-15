@@ -70,3 +70,35 @@ test('new Role cleanup queues behind an earlier scan rather than missing its new
   const gate=new Promise(resolve=>{release=resolve;});retention.execute=async()=>{if(++calls===1)await gate;return execute();};
   const earlier=retention.sweep(),later=retention.sweep();release();await Promise.all([earlier,later]);assert.equal(calls,2);
 });
+
+test('confirmed successful Role retires exact material sidecars and rejects content drift',async t=>{
+  const f=await fixture(t),s=f.service,id=`role-${randomUUID()}`,session=randomUUID(),directory=join(s.directory,'role-runs');
+  const root=executionSessionDirectory(executionSessionRoot(s.directory),id),materials=join(directory,`${id}.materials`);
+  await mkdir(root,{recursive:true});await mkdir(materials,{recursive:true});
+  const file=join(root,'task.jsonl'),data=Buffer.from([{type:'session',id:session},{type:'custom',customType:'pi-caw:task',data:{run_id:id,kind:'subagent'}}].map(JSON.stringify).join('\n')+'\n');await writeFile(file,data);
+  const spool=join(materials,'raw.stdout');await writeFile(spool,'sealed command output');
+  const journal={id,status:'completed',closed:true,session_id:session,session_file:file,session_storage:'private',execution_materials_root:materials,result:{result:{result:'Saved'}}};
+  const path=join(directory,`${id}.json`);await writeFile(path,JSON.stringify(journal));
+  // A failed cleanup may be repaired explicitly, but never silently delete
+  // material bytes that differ from the already committed original intent.
+  const worker=s.roleRetention.execute.bind(s.roleRetention);let changed=false;
+  s.roleRetention.execute=async current=>{
+    const call=current.call.bind(current);current.call=async(operation,args)=>{const result=await call(operation,args);if(operation==='roleMaterialIntent'&&!changed){changed=true;await writeFile(spool,'unexpected successor content');}return result;};return worker(current);
+  };
+  await assert.rejects(s.roleRetention.sweep(),{code:'HISTORY_MATERIAL_CHANGED'});assert.ok(await readFile(file));assert.equal(await readFile(spool,'utf8'),'unexpected successor content');
+  const saved=JSON.parse(await readFile(path,'utf8'));assert.equal(saved.cleanup_intent.materials.files[0].sha256,digest(Buffer.from('sealed command output')));assert.equal(saved.cleanup_complete,undefined);
+  await writeFile(spool,'sealed command output');s.roleRetention.execute=worker;await s.roleRetention.sweep();
+  await assert.rejects(readFile(spool),{code:'ENOENT'});assert.equal(JSON.parse(await readFile(path,'utf8')).cleanup_complete,true);
+});
+
+test('service close preserves a successful Role settling during shutdown for later maintenance',async t=>{
+  const f=await roleFixture(t),s=f.service,create=f.host.createTask.bind(f.host);let release,started;
+  const hold=new Promise(resolve=>{release=resolve;}),running=new Promise(resolve=>{started=resolve;});
+  f.host.createTask=async request=>{const task=await create(request),run=task.run.bind(task);task.run=async()=>{started();await hold;return run();};return task;};
+  const launch=await s.launchRole({role_id:'review',task:'Settle during shutdown',workspace:f.workspace});await running;
+  const closing=s.close();assert.equal(s.closing,true);release();await closing;
+  const saved=JSON.parse(await readFile(join(s.directory,'role-runs',`${launch.role_run_id}.json`),'utf8'));
+  assert.equal(saved.status,'completed');assert.equal(saved.closed,true);assert.equal(saved.result.result.result,'Reviewed');
+  assert.equal(saved.cleanup_complete,undefined);assert.equal(s.lastRoleError,undefined);assert.equal(s.roleTasks.size,0);assert.equal(f.host.tasks.size,0);
+  assert.ok(await readFile(launch.session_file));assert.ok(saved.execution_materials_root);
+});

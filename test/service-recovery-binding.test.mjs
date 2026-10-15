@@ -121,13 +121,11 @@ test('invalid explicit execution binding fails before creating a Run or native t
 
 test('a source-Workflow Role retains its exact MCP requirements in the Pi task request', async t => {
   const f = await fixture(t);
-  f.service.workbench.roleProfile = async () => ({ id: 'source-role', name: 'Source Role', status: 'ready', enabled: true,
-    provider_available: true, binding, access: 'read_only', source_workflow_id: 'role-pack', revision_hash: 'a'.repeat(64), instructions: 'Inspect the supplied task.' });
-  f.service.store.snapshot = async (id, revision) => {
-    assert.equal(id, 'role-pack'); assert.equal(revision, 'a'.repeat(64));
-    return { workflow: { requirements: { mcp_servers: ['source-mcp'] }, nodes: [{ id: 'role', type: 'agent', resources: [] }] }, resources: [] };
-  };
-  const output = await f.service.call('launch_role', { role_id: 'source-role', task: 'Inspect', workspace: f.workspace,
+  f.host.mcpCatalog = async () => ({ servers: [{ name: 'source-mcp', enabled: true, exposure: 'eager' }] });
+  const graph = { ...workflow([agent('role')]), id: 'role-pack', template_kind: 'role' };
+  graph.requirements.mcp_servers = ['source-mcp'];
+  const pack = await f.service.call('create_workflow', { workflow: graph });
+  const output = await f.service.call('launch_role', { role_id: 'role-pack', revision_hash: pack.revision_hash, task: 'Inspect', workspace: f.workspace,
     outputs_schema: agent('schema').outputs_schema });
   await Promise.all(f.service.roleTasks.values());
   assert.equal(output.status, 'running');

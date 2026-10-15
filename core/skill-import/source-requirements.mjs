@@ -1,4 +1,6 @@
 import { posix } from 'node:path';
+import { callableInventory } from './callable-inventory.mjs';
+import { sourceResourceMentions } from './source-resource-mentions.mjs';
 import { sourceSectionInventory } from './source-dispositions.mjs';
 import { exclusiveConditionFanIn, nearestDataProducerIds, selectedUpstreamBinding } from './fan-in-topology.mjs';
 import { disjointSourceSpans } from './source-evidence.mjs';
@@ -58,6 +60,25 @@ const conditionalArtifactPattern = /\b(?:optional(?:ly)?|if|when|unless|only\s+(
 const negativeArtifactPattern = /\b(?:do\s+not|don't|never|must\s+not|forbid(?:den)?)\b/i;
 const artifactClauses = text => text.split(/;\s*|(?<=[.!?])\s+(?=[A-Z])/);
 const dynamicOutputRootPattern = /\b(?:all|every)\b.{0,100}\b(?:outputs?|artifacts?|files?)\b.{0,80}\b(?:in|into|under)\s+[`'"]?<[^>]+>[\\/]/i;
+const userSelectedArtifactPattern = /\bor\s+(?:another|different|an?\s+alternative)\s+(?:file|path)\b.{0,100}\b(?:user\s+(?:explicitly\s+)?(?:names|specifies|selects|requests)|(?:named|specified|selected|requested)\s+by\s+(?:the\s+)?user)\b/i;
+
+function userSelectableArtifactPaths(lines,requiredLines){
+  const paths=new Map();
+  for(let index=0;index<lines.length;index++){
+    if(!requiredLines.has(index+1))continue;
+    const window=[lines[index].trim()];
+    // Source scope clauses often wrap onto the next indented Markdown line.
+    for(let next=index+1;next<Math.min(index+3,lines.length)&&requiredLines.has(next+1)&&lines[next].trim();next++)window.push(lines[next].trim());
+    for(const clause of artifactClauses(window.join(' '))){
+      const selection=clause.search(userSelectedArtifactPattern);
+      if(selection<0)continue;
+      const production=clause.slice(0,selection);
+      if(negativeArtifactPattern.test(production)||!/\b(?:modify|write|save|create|produce|emit|return|output|update)\b/i.test(production))continue;
+      for(const artifact of production.matchAll(artifactPathPattern))paths.set(artifact[1],{start_line:index+1,end_line:index+window.length});
+    }
+  }
+  return paths;
+}
 const interfacePattern = /\b(?:(?:exact\s+)?(?:keys?|columns?|schema|signature)|return\s+type|output\s+format)\b/i;
 const interfaceDefinitionPattern=/\b(?:exact\s+(?:keys?|columns?|fields?)|(?:keys?|columns?|fields?)\s*(?::|are\b|include\b|contain\b|named\b)|(?:return\s+type|output\s+format|signature)\s*(?::|is\b|must\s+be\b)|schema\s+(?:requires?|contains?|defines?|has)\b)/i;
 const schemaDocumentProduction=/\b(?:write|save|create|produce|emit|return|output|update)\b.{0,80}\b(?:schema\s+(?:file|document)|(?:file|document)\s+(?:with|containing)\s+(?:a\s+)?schema)\b/i;
@@ -108,6 +129,30 @@ const id = (kind, resource, line, suffix = '') => resource === SKILL_SOURCE
 // entrypoint whose instructions are always active.
 const textResources = resources => {const path=authoringSourcePath(resources);return [[path,resources[path]]];};
 
+// Callsite identity and callable data are derived from the immutable source,
+// never authored or retyped by the planner. A reference/library observation is
+// useful review evidence; only direct actionable entrypoint calls form this
+// conversion floor, and conditional calls retain their original trigger.
+export function callableSourceRequirements(resources,inventory=callableInventory(resources)){
+  const primary=authoringSourcePath(resources);
+  return inventory.callsites.filter(call=>call.resource===primary&&call.classification==='exact_call'&&['required','conditional'].includes(call.authority)).map(call=>({
+    requirement_id:call.callsite_id,
+    requirement_kind:call.interface.tool?'registered_tool':'script_operation',
+    source_spans:[structuredClone(call.source_span)],
+    trigger:call.trigger||'source_callable',
+    required_result:'Preserve this original callable and its argument, stdin/file, output and diagnostic behavior at the source-defined phase.',
+    resource_refs:[...call.resolved_resource_refs],
+    details:{callable_id:call.callsite_id,interface:structuredClone(call.interface),authority:call.authority,source_contract_ids:[...call.source_contract_ids]},
+  }));
+}
+
+// Repair admission observes the same immutable floor as initial compilation.
+// Historical Runs without the pinned policy retain their original inventory.
+export function authoringSourceRequirements(resources,{callable_inventory_policy=false}={}){
+  return [...observedSourceRequirements(resources,{source_resource_policy:callable_inventory_policy}),
+    ...(callable_inventory_policy?callableSourceRequirements(resources):[])];
+}
+
 function details(kind, line, match = null) {
   if (kind === 'artifact_path') return { artifact_path: match[1] };
   if (kind === 'artifact_schema') {
@@ -127,7 +172,7 @@ function details(kind, line, match = null) {
  * optional or nested reference enter the contract only when the proposal cites
  * that pinned resource and preserves its source-defined trigger.
  */
-export function observedSourceRequirements(resources) {
+export function observedSourceRequirements(resources,{source_resource_policy=false}={}) {
   const requirements = [];
   const contractsByResource=new Map();
   for(const contract of sourceContractIndex(resources).contracts){const entries=contractsByResource.get(contract.resource)??[];entries.push(contract.contract_id);contractsByResource.set(contract.resource,entries);}
@@ -135,6 +180,7 @@ export function observedSourceRequirements(resources) {
     const lines = bytes.toString('utf8').split('\n');
     const requiredLines=new Set(sourceSectionInventory(resources).filter(section=>section.authority==='required').flatMap(section=>Array.from({length:section.source_span.end_line-section.source_span.start_line+1},(_,offset)=>section.source_span.start_line+offset)));
     const dynamicOutputRoot=lines.some((text,index)=>requiredLines.has(index+1)&&dynamicOutputRootPattern.test(text));
+    const selectableArtifactPaths=source_resource_policy?userSelectableArtifactPaths(lines,requiredLines):new Map();
     let artifactListActive=false,conditionalScope=false;
     for (const [index, text] of lines.entries()) {
       const line = index + 1; const sourceSpans = [span(resource, line)];
@@ -161,13 +207,15 @@ export function observedSourceRequirements(resources) {
         if (conditionalScope || conditionalArtifactPattern.test(operationText) || negativeArtifactPattern.test(operationText) || (!artifactListActive && !artifactProductionPattern.test(operationText))) continue;
         for (const artifact of clause.matchAll(artifactPathPattern)) {
           if (isOperationalMemoryArtifactPath(artifact[1], { sourceText: text })) continue;
-          const runtimeScoped=dynamicOutputRoot&&!/[\\/]/.test(artifact[1]);
+          const userSelected=selectableArtifactPaths.has(artifact[1]);
+          const runtimeScoped=userSelected||(dynamicOutputRoot&&!/[\\/]/.test(artifact[1]));
+          const artifactSpans=userSelected?[...sourceSpans,{resource,...selectableArtifactPaths.get(artifact[1])}]:sourceSpans;
           artifactOrdinal++;
           // Keep the historical observation identity when its former gate was
           // a referenced interface, so retained semantic mappings stay exact.
           // The corrected source fact is a constraint, never a file to write.
           if(referenceArtifact(clause,artifact.index))requirements.push({requirement_id:id('artifact_path',resource,line,String(artifactOrdinal)),requirement_kind:'method_rule',source_spans:sourceSpans,trigger:'preserve_referenced_interface',required_result:`Preserve this source reference without producing it as an artifact: ${clause.trim().slice(0,1000)}`,resource_refs:[resource],details:details('method_rule',clause)});
-          else requirements.push({ requirement_id: id('artifact_path', resource, line, String(artifactOrdinal)), requirement_kind: 'artifact_path', source_spans: sourceSpans, trigger: runtimeScoped?'runtime_resolved_artifact':'produce_declared_artifact', required_result: runtimeScoped?`Produce ${artifact[1]} under the source-defined runtime output root.`:`Produce the exact artifact path ${artifact[1]}.`, resource_refs: [resource], details: details('artifact_path', clause, artifact) });
+          else requirements.push({ requirement_id: id('artifact_path', resource, line, String(artifactOrdinal)), requirement_kind: 'artifact_path', source_spans: artifactSpans, trigger: runtimeScoped?'runtime_resolved_artifact':'produce_declared_artifact', required_result: userSelected?`Produce the documented default artifact ${artifact[1]} or the alternative file explicitly named by the user.`:runtimeScoped?`Produce ${artifact[1]} under the source-defined runtime output root.`:`Produce the exact artifact path ${artifact[1]}.`, resource_refs: [resource], details: details('artifact_path', clause, artifact) });
         }
       }
       artifactListActive=/\b(?:write|save|create|produce|emit|return|output|update)\b[^\n]*:\s*$/i.test(artifactOperationText(text)) || (artifactListActive && /^\s*[-*+]/.test(text));
@@ -194,11 +242,13 @@ export function observedSourceRequirements(resources) {
       if(conditionalHeader)conditionalScope=true;
       if (referenceContext.test(text)) {
         let referenceOrdinal=0;
+        const resourceMentions=source_resource_policy?sourceResourceMentions(text,Object.keys(resources).filter(path=>path!==resource)):[];
         for (const match of text.matchAll(referencePathPattern)) {
           const relative=posix.normalize(match[1].replace(/^\.\//,'').replace(/^\.\.\//,''));
           const target=relative.startsWith('source/')?relative:`source/${relative}`;
           if (target===resource || !Object.hasOwn(resources,target)) continue;
           referenceOrdinal++;
+          if(source_resource_policy){const mention=resourceMentions.find(item=>item.resource===target)?.mentions.find(item=>item.from>=match.index&&item.to<=match.index+match[0].length);if(mention?.disposition==='non_runtime_reference')continue;}
           const conditional=/\b(?:optional(?:ly)?|if|when|unless|only\s+(?:if|when))\b/i.test(text);
           requirements.push({requirement_id:id('reference',resource,line,String(referenceOrdinal)),requirement_kind:'knowledge',source_spans:sourceSpans,trigger:conditional?`conditional: ${text.trim().slice(0,500)}`:'source_required_reference',required_result:`Read and apply the pinned reference ${target} at its source-defined phase.`,resource_refs:[target],details:{}});
         }
@@ -303,13 +353,14 @@ function selectedReadinessRequirements(proposal,resources) {
  * never guesses equivalence from line overlap or vocabulary; a missing mapping
  * remains a real semantic finding for one bounded planner repair.
  */
-export function projectObservedRequirements(proposal, resources) {
+export function projectObservedRequirements(proposal, resources, {callable_inventory_policy,host_callable_requirements}={}) {
   const contractProjection = Array.isArray(proposal?.source_requirements) && Array.isArray(proposal?.requirement_mappings);
   const result = structuredClone(proposal);
   result.source_requirements = Array.isArray(result.source_requirements) ? result.source_requirements : [];
   result.requirement_mappings = Array.isArray(result.requirement_mappings) ? result.requirement_mappings : [];
   const selectedReadiness=selectedReadinessRequirements(result,resources);
-  const observedBase = [...observedSourceRequirements(resources),...selectedReadiness.map(item=>item.requirement)];
+  const hasCallablePolicy=callable_inventory_policy??[...(result.source_requirements??[]),...(result.requirement_mappings??[])].some(item=>String(item.requirement_id??'').startsWith('callable_'));
+  const observedBase = [...observedSourceRequirements(resources,{source_resource_policy:hasCallablePolicy}),...selectedReadiness.map(item=>item.requirement),...(hasCallablePolicy?(host_callable_requirements??callableSourceRequirements(resources)):[])];
   const observed = reconciledObservedRequirements(observedBase,result.source_requirements,resources);
   const observedIds = new Set(observedBase.map(item => item.requirement_id));
   const retainedIds=new Set(observed.map(item=>item.requirement_id));

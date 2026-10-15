@@ -13,6 +13,7 @@ import { createParentMainBridge } from '../lib/parent-main-bridge.mjs';
 import { createOwnerRpcServer, ownerRpc } from '../lib/detached-owner.mjs';
 import { createRemoteHostTools, externalHostToolDescriptors, mergeHostTools, executeExternalHostTool } from '../lib/external-host-tools.mjs';
 import { hostToolContractsCompatible, hostToolBindingIssues, validateHostToolReceipt } from '../core/execution/host-tool-runner.mjs';
+import { createWorkerObserver, observeWorkerJournalTerminal } from '../lib/pi-worker.mjs';
 
 const effects = () => ({ observed: true, changed_paths: [], outside_paths: [], artifacts: [] });
 const identity = { name: 'fixture-domain', version: '1', sha256: digest('fixture-domain') };
@@ -30,6 +31,56 @@ const executionContext = attempt_id => ({ run_id: 'domain-run', node_id: 'final'
 async function until(read, accepts, ms = 15000) { const deadline = Date.now() + ms;
   while (Date.now() < deadline) { const value = await read(); if (accepts(value)) return value; await new Promise(done => setTimeout(done, 20)); }
   assert.fail('Exact domain execution did not settle'); }
+
+function terminalNotificationEvidence(entries) {
+  return entries.slice(0, 4).map(entry => ({ hash: entry.hash ?? digest(canonicalJSON(entry.event)),
+    run_id: entry.event.run_id, status: entry.event.status, sequence: entry.event.sequence ?? null,
+    ownership_released: entry.event.ownership_released === true, quiescent: entry.event.quiescent === true,
+    fields: Object.keys(entry.event).sort().slice(0, 32),
+    shutdown_source: entry.event.shutdown?.source ?? null }));
+}
+function deferred() { let release; const promise = new Promise(resolve => { release = resolve; }); return { promise, release }; }
+
+for (const stage of ['read', 'enrichment']) test(`delayed terminal journal ${stage} cannot queue a second driver completion with another delivery hash`, async () => {
+  const reached = deferred(), release = deferred(), reported = [], sent = [], settled = [], run_id = `terminal-${stage}`;
+  const source = { run_id, status: 'succeeded', sequence: 12, quiescent: true, ownership_released: true };
+  const driver = { run_id, status: 'succeeded', approvals: [], quiescent: true, ownership_released: true };
+  const observer = createWorkerObserver({ run_id, report: async value => reported.push(value),
+    send: async event => { sent.push(event); throw Object.assign(new Error('Parent delivery unavailable'), { code: 'FIXTURE_DELIVERY_UNAVAILABLE' }); },
+    settle: async event => settled.push(event) });
+  const service = { active: new Map(), runtime: { runs: { read: async () => {
+    if (stage === 'read') { reached.release(); await release.promise; }
+    return { state: { run_id, status: 'succeeded' }, sequence: 12 };
+  } } }, enrichNotification: async () => {
+    if (stage === 'enrichment') { reached.release(); await release.promise; }
+    return source;
+  } };
+  const monitor = observeWorkerJournalTerminal({ run_id, service, observer });
+  await reached.promise;
+  await observer.observe(driver);
+  release.release(); await monitor;
+  const queued = reported.at(-1).parent_notification.events.map(event => ({ event }));
+  assert.equal(queued.length, 1, JSON.stringify({ phase: `delayed_${stage}`, terminal_events: terminalNotificationEvidence(queued) }));
+  assert.deepEqual(queued[0].event, driver);
+  assert.deepEqual(sent, [driver]); assert.deepEqual(settled, [driver]);
+});
+
+test('terminal monitor waits for the exact driver publication while still observing dormant controller completion', async () => {
+  const run_id = 'driver-publication', reported = [], delivered = [], settled = []; let reads = 0;
+  const event = { run_id, status: 'cancelled', sequence: 9, ownership_released: true, quiescent: true };
+  const observer = createWorkerObserver({ run_id, report: async value => reported.push(value),
+    send: async value => delivered.push(value), settle: async value => settled.push(value) });
+  const service = { active: new Map([[run_id, { completion: null }]]),
+    runtime: { runs: { read: async () => { reads++; return { state: { run_id, status: event.status }, sequence: event.sequence }; } } },
+    enrichNotification: async () => event };
+  assert.deepEqual(await observeWorkerJournalTerminal({ run_id, service, observer }), { observed: false });
+  assert.equal(reads, 0); assert.deepEqual(delivered, []);
+  service.active.delete(run_id);
+  assert.deepEqual(await observeWorkerJournalTerminal({ run_id, service, observer }), { observed: true });
+  assert.deepEqual(delivered, [event]); assert.deepEqual(settled, [event]);
+  assert.deepEqual(await observeWorkerJournalTerminal({ run_id, service, observer }), { observed: false });
+  assert.equal(reads, 1); assert.deepEqual(reported.at(-1).parent_notification.events, []);
+});
 
 test('trusted registries reject collisions and unqualified entries; descriptors retain contract without closures/state', () => {
   const domain = tool(); domain.private_state = { secret: 'never serialized' };
@@ -212,7 +263,11 @@ for (const mode of ['in-process', 'detached', 'reattached', 'queued-restart', 'c
   assert.ok(events.some(event => event.data.status === 'succeeded' && event.data.ownership_released === true && event.data.quiescent === true));
   if (mode === 'queued-restart') {
     const queued = await service.detachedOwners.pendingNotifications(runId);
-    assert.equal(queued.length, 1); assert.deepEqual(queued[0].event.host_tool_ids, ['domain_read']);
+    if (queued.length !== 1) await writeFile(join(root, 'terminal-notification-diagnostic.json'), canonicalJSON({
+      schema_version: 1, run_id: runId, queued_count: queued.length, terminal_events: terminalNotificationEvidence(queued) }));
+    assert.equal(queued.length, 1, JSON.stringify({ diagnostic_path: join(root, 'terminal-notification-diagnostic.json'),
+      queued_count: queued.length, terminal_events: terminalNotificationEvidence(queued) }));
+    assert.deepEqual(queued[0].event.host_tool_ids, ['domain_read']);
     await service.close(); classifiedRuns.clear(); failDelivery = false;
     service = await new PiCawService({ directory: join(root, 'state'), host, notify }).initialize();
     const replayed = notifications.filter(item => item.event.status === 'succeeded');

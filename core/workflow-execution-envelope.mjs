@@ -1,3 +1,4 @@
+import { providersForWorkflow } from './workflow-provider-bindings.mjs';
 import { isAbsolute, relative, resolve } from 'node:path';
 import { createHmac } from 'node:crypto';
 import { runtimeEnvironmentForWorker } from './runtime-environment-state.mjs';
@@ -41,11 +42,13 @@ export function nodePermissions(node, state) {
 export function bindingContext(state) {
   const loops = Object.fromEntries(Object.entries(state.loops ?? {}).map(([id, loop]) => [id,
     Object.fromEntries(['round','status','feedback','all_accepted','review_items','repair_items'].filter(key => Object.hasOwn(loop, key)).map(key => [key, loop[key]]))]));
-  return { inputs: state.inputs, loops, nodes: Object.fromEntries(Object.entries(state.nodes).map(([id, node]) => [id, { output: node.output }])) };
+  // Skipped branches never produced a semantic value. Their journal placeholder
+  // must not win coalesce; executed nodes may still intentionally return null.
+  return { inputs: state.inputs, loops, nodes: Object.fromEntries(Object.entries(state.nodes).map(([id, node]) => [id, node.status === 'skipped' ? {} : { output: node.output }])) };
 }
 
 export function approvalBinding(node, state, pins, attemptNumber = state.nodes[node.id].attempts.length + 1) {
-  const provider = ['provider', 'thread'].includes(node.executor?.kind) ? pins.providers.find(item => item.id === node.executor.provider_id) : node.executor?.kind === 'main' ? pins.authoring_reviewer ?? pins.generation?.reviewer ?? null : null;
+  const provider = ['provider', 'thread'].includes(node.executor?.kind) ? providersForWorkflow(pins,pins.root.workflow).find(item => item.id === node.executor.provider_id) : node.executor?.kind === 'main' ? pins.authoring_reviewer ?? pins.generation?.reviewer ?? null : null;
   const permissions = nodePermissions(node, state);
   return {
     required: Boolean(node.approval.required || provider?.requires_user_approval || state.require_approval),
@@ -62,7 +65,7 @@ export function executionEnvelope(node, state, pins, attempt, token) {
   const constraints=structuredClone(state.constraints);
   delete constraints.native_parent_thread_id;
   delete constraints.runtime_requirements;
-  const runtimeEnvironment = runtimeEnvironmentForWorker(state);
+  const runtimeEnvironment = runtimeEnvironmentForWorker(state,node,pins);
   if (runtimeEnvironment) constraints.runtime_environment = runtimeEnvironment;
   const context = projectNodeContext(node, pins.root.workflow, bindingContext(state));
   const skillPolicy = effectiveSkillPolicy(pins.inherited_policy ?? pins.root.workflow.skill_policy, node.skill_policy);
@@ -75,7 +78,7 @@ export function executionEnvelope(node, state, pins, attempt, token) {
   const threadExecutor = isThreadExecutor(node.executor);
   let subagents=null;
   if(node.subagent_count!==undefined){
-    requireValue(node.executor?.kind!=='main','SUBAGENT_COUNT','Main Agent nodes cannot configure sub-Agent quantity');
+    requireValue(node.executor?.kind!=='main'||node.fanout&&node.executor.mode!=='orchestration','SUBAGENT_COUNT','Main child quantity requires a worker fan-out');
     let resolved_count=node.subagent_count==='auto'?1:node.subagent_count,items=null;
     if(node.fanout){
       items=context.inputs[node.fanout.input];
@@ -96,7 +99,7 @@ export function executionEnvelope(node, state, pins, attempt, token) {
   return {
     run_id: state.run_id, workflow_id: state.workflow_id, workflow_name: pins.root.workflow.name, workflow_revision: state.workflow_revision,
     node_id: node.id, node_name: node.name ?? node.id, attempt_id: attempt.id, lease_token: token, executor: structuredClone(node.executor),
-    provider: ['provider', 'thread'].includes(node.executor.kind) ? structuredClone(pins.providers.find(item => item.id === node.executor.provider_id)) : null,
+    provider: ['provider', 'thread'].includes(node.executor.kind) ? structuredClone(providersForWorkflow(pins,pins.root.workflow).find(item => item.id === node.executor.provider_id)) : null,
     role: node.role ?? null, access: permissions.access, workspace: nodeWorkspace(node.id, state, pins),
     inputs: context.inputs, context_projection: context.projection,
     constraints: {...constraints,...(state.constraints.task_workspace?{task_workspace:nodeWorkspace(node.id,state,pins)}:{})},

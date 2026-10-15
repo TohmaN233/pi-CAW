@@ -5,10 +5,12 @@ const key={type:'string',minLength:1,maxLength:128};
 const source={type:'string',minLength:1,maxLength:260};
 const until={type:'object',required:['output'],additionalProperties:false,properties:{activity:key,loop:key,output:key,op:{type:'string',enum:['eq','ne','gt','gte','lt','lte']},value:{description:'A typed JSON scalar compared with the named semantic output.'}}};
 export const SEMANTIC_LOOP_SCHEMA=Object.freeze({type:'object',required:['key','entry_activity','exit_activity','activity_keys','max_rounds','until'],additionalProperties:false,properties:{
-  key,entry_activity:key,exit_activity:key,activity_keys:{type:'array',minItems:1,maxItems:64,items:key},max_rounds:{type:'integer',minimum:1,maximum:Number.MAX_SAFE_INTEGER},until,
+  key,entry_activity:key,exit_activity:key,activity_keys:{type:'array',minItems:2,maxItems:64,items:key},max_rounds:{description:'Use a positive safe integer for a finite loop; null is valid only with review_context current_main.'},review_context:{type:'string',const:'current_main'},until,
   feedback_inputs:{type:'array',maxItems:128,items:{type:'object',required:['name','from'],additionalProperties:false,properties:{name:key,from:source}}},
   item_scope:{type:'object',required:['items','verdicts','paths_field'],additionalProperties:false,properties:{items:source,verdicts:source,paths_field:key,dependencies_field:key}},
 }});
+const previousLoopProperties={...SEMANTIC_LOOP_SCHEMA.properties,activity_keys:{...SEMANTIC_LOOP_SCHEMA.properties.activity_keys,minItems:1},max_rounds:{type:'integer',minimum:1,maximum:Number.MAX_SAFE_INTEGER}};delete previousLoopProperties.review_context;
+export const PREVIOUS_SEMANTIC_LOOP_SCHEMA=Object.freeze({...SEMANTIC_LOOP_SCHEMA,properties:previousLoopProperties});
 export const LOOP_FIELDS=new Set(['round','status','feedback','all_accepted','review_items','repair_items']);
 export function semanticLoopReference(value){
   if(typeof value!=='string'||!value.startsWith('loop:'))return null;
@@ -25,11 +27,14 @@ export function semanticLoopFindings(blueprint){
     if(loops.has(item.key))report('loop_duplicate',`Repair loop ${item.key} must have a unique semantic key`,item);
     if(activities.has(item.key))report('loop_key_collision',`Repair loop ${item.key} must not reuse an activity semantic key`,item);
     loops.set(item.key,item);
-    if(!Number.isSafeInteger(item.max_rounds)||item.max_rounds<1)report('loop_bound',`Repair loop ${item.key} requires a finite positive safe-integer max_rounds`,item);
+    const currentMain=item.review_context==='current_main';
+    if(!Number.isSafeInteger(item.max_rounds)||item.max_rounds<1){
+      if(!(currentMain&&item.max_rounds===null))report('loop_bound',currentMain?`Current-Main repair loop ${item.key} requires a positive finite max_rounds or explicit null for uncapped semantic revisions`:`Repair loop ${item.key} requires a finite positive safe-integer max_rounds`,item);
+    }
     const members=item.activity_keys??[];
     if(members.length<2||new Set(members).size!==members.length||members.some(key=>!activities.has(key))||!members.includes(item.entry_activity)||!members.includes(item.exit_activity))report('loop_members',`Repair loop ${item.key} requires distinct existing repair/review activities and entry/exit members`,item);
     const exit=activities.get(item.exit_activity);
-    if(!['main_read','worker_read','worker_complex_read','review'].includes(exit?.profile)||exit.tool||exit.task_continues)report('loop_independent_review',`Repair loop ${item.key} must end with a fresh read-only reviewer (Main worker, isolated worker or review Provider)`,item);
+    if((currentMain?exit?.profile!=='orchestration_read':!['main_read','worker_read','worker_complex_read','review'].includes(exit?.profile))||exit?.tool||exit?.task_continues)report('loop_independent_review',currentMain?`Current-Main repair loop ${item.key} must end with an orchestration_read activity`:`Repair loop ${item.key} must end with a fresh read-only reviewer (Main worker, isolated worker or review Provider)`,item);
     if(exit?.fail_on_false?.length)report('loop_acceptance_guard',`Repair loop ${item.key} review rejection is semantic feedback; remove fail_on_false from its exit review`,item);
     if(exit?.repeat_until)report('loop_review_retry',`Repair loop ${item.key} exit review cannot replace downstream semantic repair with repeat_until`,item);
     const condition=item.until;
@@ -40,6 +45,11 @@ export function semanticLoopFindings(blueprint){
       const declared=output(`${condition.activity}.${condition.output}`),value=Object.hasOwn(condition,'value')?condition.value:true;
       const kind=declared?.kind==='text'||declared?.kind==='enum'?'string':declared?.kind;
       if(!['boolean','string','number','integer'].includes(kind)||(kind==='integer'?!Number.isInteger(value):kind!==typeof value)||['gt','gte','lt','lte'].includes(condition.op)&&!['number','integer'].includes(kind))report('loop_until_type',`Repair loop ${item.key} acceptance comparison must match its exit output type`,item);
+    }
+    if(currentMain){
+      const validOutput=condition?.activity===item.exit_activity&&condition.output==='accepted'&&output(`${item.exit_activity}.accepted`)?.kind==='boolean';
+      const value=condition&&Object.hasOwn(condition,'value')?condition.value:true;
+      if(!validOutput||(condition?.op??'eq')!=='eq'||value!==true)report('loop_current_main_acceptance',`Current-Main repair loop ${item.key} must stop only when its exit accepted output is true`,item);
     }
     if(condition&&Object.hasOwn(condition,'value')&&(!['string','boolean','number'].includes(typeof condition.value)||typeof condition.value==='number'&&!Number.isFinite(condition.value)))report('loop_until_value',`Repair loop ${item.key} acceptance comparison must use a finite JSON scalar`,item);
     if(new Set((item.feedback_inputs??[]).map(input=>input.name)).size!==(item.feedback_inputs??[]).length)report('loop_feedback',`Repair loop ${item.key} feedback names must be unique`,item);
@@ -88,6 +98,37 @@ function affirmativeRepairReviewClauses(text){
   return accepted;
 }
 
+function explicitCurrentMainReviewIntent(text){
+  const instructions=text.replace(/"[^"\n]*"|“[^”\n]*”|‘[^’\n]*’|`[^`\n]*`/g,' ');
+  const clauses=instructions.split(/[;；.!?。！？\n]+/).map(clause=>clause.trim()).filter(Boolean);
+  const mainBeforeReview=/\b(?:the\s+)?current\s+(?:pi\s+)?main(?:\s+(?:pi\s+)?(?:chat|conversation))?\b[^;；.!?。！？\n]{0,80}\b(?:review(?:s|ed|ing)?|audit(?:s|ed|ing)?|inspect(?:s|ed|ing)?)\b/i;
+  const reviewBeforeMain=/\b(?:review(?:s|ed|ing)?|audit(?:s|ed|ing)?|inspect(?:s|ed|ing)?)\b[^;；.!?。！？\n]{0,80}\b(?:the\s+)?current\s+(?:pi\s+)?main(?:\s+(?:pi\s+)?(?:chat|conversation))?\b/i;
+  const chineseMainBeforeReview=/(?:当前|本次|目前)(?:的)?\s*(?:Pi\s*)?Main(?:\s*(?:主对话|聊天))?[^;；.!?。！？\n]{0,80}(?:审阅|复审|审查|审核|检查|评审)/i;
+  const chineseReviewBeforeMain=/(?:审阅|复审|审查|审核|检查|评审)[^;；.!?。！？\n]{0,80}(?:由|在|使用)?\s*(?:当前|本次|目前)(?:的)?\s*(?:Pi\s*)?Main/i;
+  const negated=/(?:\b(?:do\s+not|don['’]t|never|must\s+not|should\s+not|cannot|can['’]t|avoid|without)\b[^;；.!?。！？\n]{0,80}\bcurrent\s+(?:pi\s+)?main\b|\bcurrent\s+(?:pi\s+)?main\b[^;；.!?。！？\n]{0,50}\b(?:not|never|cannot|can['’]t|won['’]t)\b[^;；.!?。！？\n]{0,40}\b(?:review|audit|inspect)\b|\b(?:review|audit|inspect)\b[^;；.!?。！？\n]{0,50}\b(?:not|never|cannot|can['’]t|won['’]t)\b[^;；.!?。！？\n]{0,40}\bcurrent\s+(?:pi\s+)?main\b|(?:不允许|不应|不得|不要|不能|不可|禁止|无需|不必)[^;；.!?。！？\n]{0,40}(?:当前|本次|目前)(?:的)?\s*(?:Pi\s*)?Main|(?:当前|本次|目前)(?:的)?\s*(?:Pi\s*)?Main[^;；.!?。！？\n]{0,40}(?:不允许|不应|不得|不要|不能|不可|禁止|无需|不必)[^;；.!?。！？\n]{0,30}(?:审阅|复审|审查|审核|检查|评审))/i;
+  const uncertain=/(?:\b(?:may|might|could|maybe|perhaps|optional|optionally|consider|discuss|reference|references|documentation|example|examples|mentions?|describe|describes|explain|explains|quote|quotes)\b|\bif\s+(?:desired|needed|appropriate)\b|\bnot\s+(?:required|necessary|mandatory)\b|可能|或许|可选|酌情|考虑|讨论|参考|引用|示例|提到|解释|是否|非必须|不是必须|并非必须|不是要求|不作要求)/i;
+  return clauses.some(clause=>(mainBeforeReview.test(clause)||reviewBeforeMain.test(clause)||chineseMainBeforeReview.test(clause)||chineseReviewBeforeMain.test(clause))&&!negated.test(clause)&&!uncertain.test(clause));
+}
+
+function affirmativeIndependentReviewIntent(text){
+  const instructions=text.replace(/"[^"\n]*"|“[^”\n]*”|‘[^’\n]*’|`[^`\n]*`/g,' ');
+  const clauses=instructions.split(/[;；.!?。！？\n]+/).map(clause=>clause.trim()).filter(Boolean);
+  const independent=/(?:\b(?:independent|separate|external)\s+(?:reviewer|review)\b|\b(?:reviewer|review)\b[^;；.!?。！？\n]{0,30}\b(?:independent|separate|external)\b|\bindependently\s+(?:review|audit|inspect)\b|独立[^;；.!?。！？\n]{0,8}(?:审查|审核|审阅|评审))/i;
+  const negated=/(?:\b(?:do\s+not|don['’]t|never|must\s+not|should\s+not|cannot|can['’]t|avoid|without|no\s+need\s+to|not\s+to)\b[^;；.!?。！？\n]{0,80}\b(?:independent|separate|external)\s+(?:reviewer|review)\b|\b(?:independent|separate|external)\s+(?:reviewer|review)\b[^;；.!?。！？\n]{0,50}\b(?:not|never|cannot|can['’]t|won['’]t)\b|(?:不允许|不应|不得|不要|不能|不可|禁止|无需|不必|不需要|不使用|不采用)[^;；.!?。！？\n]{0,40}独立[^;；.!?。！？\n]{0,8}(?:审查|审核|审阅|评审))/i;
+  const uncertain=/(?:\b(?:may|might|could|maybe|perhaps|optional|optionally|consider|discuss|reference|references|documentation|example|examples|mentions?|describe|describes|explain|explains|quote|quotes)\b|\bif\s+(?:desired|needed|appropriate)\b|\bnot\s+(?:required|necessary|mandatory)\b|可能|或许|可选|酌情|考虑|讨论|参考|引用|示例|提到|解释|是否|非必须|不是必须|并非必须|不是要求|不作要求)/i;
+  return clauses.some(clause=>independent.test(clause)&&!negated.test(clause)&&!uncertain.test(clause));
+}
+
+function affirmativeDownstreamReviewIntent(text){
+  if(affirmativeIndependentReviewIntent(text))return true;
+  const instructions=text.replace(/"[^"\n]*"|“[^”\n]*”|‘[^’\n]*’|`[^`\n]*`/g,' ');
+  const clauses=instructions.split(/[;；.!?。！？\n]+/).map(clause=>clause.trim()).filter(Boolean);
+  const downstream=/(?:\bdownstream\b|\breviewers?\b|\bif\s+(?:the\s+)?review\b|\breview\s+(?:rejects|fails)\b|(?:审查|审核|审阅|验收)[^;；.!?。！？\n]{0,30}(?:不通过|拒绝|失败))/i;
+  const negated=/(?:\b(?:do\s+not|don['’]t|never|must\s+not|should\s+not|cannot|can['’]t|avoid|without|no\s+need\s+to|not\s+to|no)\b[^;；.!?。！？\n]{0,80}\b(?:downstream|reviewers?)\b|\b(?:downstream|reviewers?)\b[^;；.!?。！？\n]{0,50}\b(?:not|never|cannot|can['’]t|won['’]t)\b|(?:不允许|不应|不得|不要|不能|不可|禁止|无需|不必|不需要|不使用|不采用)[^;；.!?。！？\n]{0,40}(?:下游|审核员|审阅员|审查员))/i;
+  const uncertain=/(?:\b(?:may|might|could|maybe|perhaps|optional|optionally|consider|discuss|reference|references|documentation|example|examples|mentions?|describe|describes|explain|explains|quote|quotes)\b|\bif\s+(?:desired|needed|appropriate)\b|\bnot\s+(?:required|necessary|mandatory)\b|可能|或许|可选|酌情|考虑|讨论|参考|引用|示例|提到|解释|是否|非必须|不是必须|并非必须|不是要求|不作要求)/i;
+  return clauses.some(clause=>downstream.test(clause)&&!negated.test(clause)&&!uncertain.test(clause));
+}
+
 // Recognize affirmative repair-and-repeated-review instructions, rather than
 // joining unrelated keyword hits. Negation, uncertainty and reference prose
 // remain the independent semantic reviewer's responsibility.
@@ -97,13 +138,31 @@ export function sourceRepairLoopIntentFindings(proposal,resources){
   let start=0;
   const inspect=end=>{
     const text=lines.slice(start,end).join(' ');
-    const downstream=/(?:independent(?:ly)?|reviewer|downstream|if (?:the )?review|review (?:rejects|fails)|独立|(?:审查|审核|审阅|验收).*(?:不通过|拒绝|失败))/i.test(text)&&affirmativeRepairReviewClauses(text).length>0;
+    const explicitMainReview=explicitCurrentMainReviewIntent(text);
+    const unbounded=/(?:unbounded|unlimited|uncapped|without (?:a )?(?:limit|maximum)|no (?:limit|maximum)|无限|不设上限)/i.test(text);
+    const repeatedRepairReview=affirmativeRepairReviewClauses(text).length>0;
+    const downstream=(unbounded&&explicitMainReview)||(repeatedRepairReview&&(explicitMainReview||affirmativeDownstreamReviewIntent(text)));
     if(!downstream)return;
     const span={resource,start_line:start+1,end_line:end},covered=(proposal.nodes??[]).filter(node=>(node.source_spans??[node.source_span]).some(source=>source?.resource===resource&&source.start_line<=end&&source.end_line>=start+1));
     const keys=covered.map(node=>node.semantic_key).filter(Boolean),loop=(proposal.loops??[]).find(loop=>loop.node_ids?.some(id=>covered.some(node=>node.id===id)));
-    if(/(?:unbounded|unlimited|without (?:a )?(?:limit|maximum)|无限|不设上限)/i.test(text))findings.push({...finding('loop_source_unbounded','The source explicitly requires unbounded semantic repair; a finite executable loop cannot preserve that instruction',keys,'loops'),source_refs:[span],check_ids:['failure_semantics']});
+    const requiresIndependentReview=affirmativeIndependentReviewIntent(text);
+    const qualifiedCurrentMainLoop=(candidate,uncappedOnly)=>{
+      const validBound=uncappedOnly?candidate?.max_rounds===null:Number.isSafeInteger(candidate?.max_rounds)&&candidate.max_rounds>0;
+      if(!candidate||candidate.review_context!=='current_main'||!validBound||!covered.length)return false;
+      const members=new Set(candidate.node_ids??[]),until=candidate.until?.args,exit=(proposal.nodes??[]).find(node=>node.id===candidate.exit_node);
+      return members.has(candidate.entry_node)&&members.has(candidate.exit_node)
+        &&covered.every(node=>members.has(node.id))
+        &&exit?.type==='agent'&&exit.execution_target==='main'&&exit.main_mode==='orchestration'&&exit.operation_mode==='read'
+        &&exit.outputs_schema?.properties?.accepted?.type==='boolean'&&!exit.completion_contract?.fail_on_false?.length
+        &&candidate.until?.op==='eq'&&until?.length===2&&until[0]?.path===`/nodes/${candidate.exit_node}/output/accepted`&&until[1]?.value===true;
+    };
+    if(unbounded){
+      const qualified=explicitMainReview&&!requiresIndependentReview&&(proposal.loops??[]).some(candidate=>qualifiedCurrentMainLoop(candidate,true));
+      if(!qualified)findings.push({...finding('loop_source_unbounded','The source explicitly requires unbounded semantic repair; only a covering current-Main loop that stops on accepted=true preserves that instruction',keys,'loops'),source_refs:[span],check_ids:['failure_semantics']});
+    }
     else if(!loop)findings.push({...finding('loop_source_missing','The source requires downstream review to repair upstream work and review again; declare a real bounded repair loop rather than local repeat_until or prose',keys,'loops'),source_refs:[span],check_ids:['failure_semantics']});
     else {
+      if(explicitMainReview&&(!qualifiedCurrentMainLoop(loop,false)||requiresIndependentReview))findings.push({...finding('loop_source_review_context','The source explicitly requires review in the current Main conversation; preserve that context with a covering current-Main loop',keys,'loops'),source_refs:[span],check_ids:['failure_semantics']});
       const match=/(?:at most|maximum of|up to)\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+rounds?\b|最多\s*(\d+)\s*轮/i.exec(text);
       const number=match?.[1]??match?.[2],words={one:1,two:2,three:3,four:4,five:5,six:6,seven:7,eight:8,nine:9,ten:10},bound=number?(words[number.toLowerCase()]??Number(number)):null;
       if(Number.isSafeInteger(bound)&&bound>0&&loop.max_rounds!==bound)findings.push({...finding('loop_source_bound','The repair-loop round limit conflicts with the explicit source bound',keys,'loops'),source_refs:[span],check_ids:['failure_semantics']});
@@ -140,7 +199,7 @@ export function compileSemanticLoops({blueprint,nodes,edges,activityIds,activity
       addEdge(entryNode,entry,{label:'repair',section_ids:sections});addEdge(entryNode,exit,{label:'review',section_ids:sections});members.add(entryNode);
     }
     const source=item.until.loop?`/loops/${loopIds.get(item.until.loop)}/${item.until.output}`:pointer(`${item.until.activity}.${item.until.output}`);
-    compiled.push({id,entry_node:entryNode,exit_node:exit,node_ids:[...members],max_rounds:item.max_rounds,until:{op:item.until.op??'eq',args:[{path:source},{value:Object.hasOwn(item.until,'value')?item.until.value:true}]},...(item.feedback_inputs?.length?{feedback_bindings:Object.fromEntries(item.feedback_inputs.map(input=>[input.name,pointer(input.from)]))}:{}),...(item.item_scope?{item_scope:{items:pointer(item.item_scope.items),verdicts:pointer(item.item_scope.verdicts),paths_field:item.item_scope.paths_field,...(item.item_scope.dependencies_field?{dependencies_field:item.item_scope.dependencies_field}:{})}}:{})});
+    compiled.push({id,entry_node:entryNode,exit_node:exit,node_ids:[...members],max_rounds:item.max_rounds,...(item.review_context?{review_context:item.review_context}:{}),until:{op:item.until.op??'eq',args:[{path:source},{value:Object.hasOwn(item.until,'value')?item.until.value:true}]},...(item.feedback_inputs?.length?{feedback_bindings:Object.fromEntries(item.feedback_inputs.map(input=>[input.name,pointer(input.from)]))}:{}),...(item.item_scope?{item_scope:{items:pointer(item.item_scope.items),verdicts:pointer(item.item_scope.verdicts),paths_field:item.item_scope.paths_field,...(item.item_scope.dependencies_field?{dependencies_field:item.item_scope.dependencies_field}:{})}}:{})});
   }
   for(let left=0;left<compiled.length;left++)for(let right=left+1;right<compiled.length;right++){
     const a=new Set(compiled[left].node_ids),b=new Set(compiled[right].node_ids),overlap=[...a].filter(id=>b.has(id));

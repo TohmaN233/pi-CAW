@@ -3,7 +3,8 @@ import { readFile, writeFile, readdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
-const result = await build({ absWorkingDir: root, tsconfig: 'web-src/tsconfig.json', entryPoints: ['web-src/main.tsx'], outfile: 'web/workflows.js', bundle: true, write: false, metafile: true, format: 'esm', minify: true, sourcemap: false, target: ['chrome120', 'firefox121', 'safari17'], legalComments: 'inline', define: { 'process.env.NODE_ENV': '"production"' } });
+const packageMetadata = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
+const result = await build({ absWorkingDir: root, tsconfig: 'web-src/tsconfig.json', entryPoints: ['web-src/main.tsx'], outfile: 'web/workflows.js', bundle: true, write: false, metafile: true, format: 'esm', minify: true, sourcemap: false, target: ['chrome120', 'firefox121', 'safari17'], legalComments: 'inline', define: { 'process.env.NODE_ENV': '"production"', __PI_CAW_VERSION__: JSON.stringify(packageMetadata.version) } });
 const packagePaths = [...new Set(Object.keys(result.metafile.inputs).filter(path => path.startsWith('node_modules/')).map(path => { const parts = path.split('/'); return parts.slice(0, parts[1].startsWith('@') ? 3 : 2).join('/'); }))].sort();
 const licenses = [];
 for (const path of packagePaths) {

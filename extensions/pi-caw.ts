@@ -1,4 +1,5 @@
 import * as sdk from '@earendil-works/pi-coding-agent';
+import { randomUUID } from 'node:crypto';
 import { Type } from '@earendil-works/pi-ai';
 import { getSupportedThinkingLevels } from '@earendil-works/pi-ai/compat';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
@@ -8,15 +9,25 @@ import { resolveStateDirectory } from '../lib/settings.mjs';
 import { openWorkbench } from '../lib/workbench-server.mjs';
 import { WORKBENCH_OPERATIONS } from '../lib/workbench-api.mjs';
 import { feedbackText } from '../lib/run-feedback.mjs';
+import { projectWorkflowContext } from '../lib/notification-context.mjs';
 
 const actions = [...new Set(['capabilities', 'models', 'roles', 'list', 'get_workflow', 'create_workflow', 'save_workflow', 'validate',
-  'runs', 'run_snapshot', 'run', 'launch_role', 'pause', 'cancel', 'continue', 'collect_host_tool', 'main_task', 'main_resource', 'main_tool', 'main_result',
+  'runs', 'inspect_run_admission', 'recover_run_admission', 'run_snapshot', 'run', 'launch_role', 'pause', 'cancel', 'continue', 'collect_host_tool', 'main_task', 'main_resource', 'main_tool', 'main_result',
   ...WORKBENCH_OPERATIONS])];
 
 export default function piCaw(pi: ExtensionAPI) {
   let context: ExtensionContext;
   let service: PiCawService | undefined;
+  let ownedService: PiCawService | undefined;
+  let ownedServiceTrace: { lifecycle_id: string; pid: number; session_id: string } | undefined;
+  let initialization: Promise<PiCawService> | undefined;
+  let ownedServiceClose: Promise<void> | undefined;
+  let shuttingDown = false;
+  let shutdown: Promise<void> | undefined;
   let workbench: Awaited<ReturnType<typeof openWorkbench>> | undefined;
+  let workbenchOpening: Promise<Awaited<ReturnType<typeof openWorkbench>>> | undefined;
+  let workbenchOpeningCancellation: { opening: Promise<Awaited<ReturnType<typeof openWorkbench>>>; error: Error } | undefined;
+  let workbenchClose: Promise<void> | undefined;
   const domainRuns = new Set<string>();
   const releaseFeedback=pi.events.on('pi-caw:run-feedback',(value:unknown)=>{
     const event=value as {run_id:string;main_actor:string;status:string};
@@ -33,21 +44,25 @@ export default function piCaw(pi: ExtensionAPI) {
   });
   const releaseHostCommand = pi.events.on('pi-caw:host-command', (value: unknown) => {
     const request = value as { session_id: string; operation: string; args: Record<string, unknown>; resolve: (result: unknown) => void; reject: (error: unknown) => void };
+    if (!context || request.session_id !== context.sessionManager.getSessionId()) return;
     if (typeof request?.resolve !== 'function' || typeof request?.reject !== 'function') throw new Error('Invalid private pi-CAW Host command callbacks');
     void (async () => {
-      if (!service || !context || request.session_id !== context.sessionManager.getSessionId()) throw new Error('Private pi-CAW Host command requires the exact current Pi session');
-      if (!['list', 'run', 'get', 'inspect_run', 'cancel', 'cleanup_run_history', 'run_retention', 'install_workflow_package'].includes(request.operation)) throw new Error('Private pi-CAW Host operation is not allowed');
+      if (shuttingDown) throw shutdownError();
+      const current = service;
+      if (!current) throw new Error('Private pi-CAW Host is not ready in this session');
+      if (!['list', 'run', 'get', 'inspect_run', 'inspect_run_admission', 'cancel', 'cleanup_run_history', 'run_retention', 'install_workflow_package'].includes(request.operation)) throw new Error('Private pi-CAW Host operation is not allowed');
       if (request.operation === 'install_workflow_package' && (typeof request.args?.package_path !== 'string'
         || typeof request.args?.expected_sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(request.args.expected_sha256)
         || Object.keys(request.args).some(key => !['package_path', 'expected_sha256'].includes(key)))) {
         throw new Error('Private pi-CAW Host installation requires one pinned local package file');
       }
       if (request.operation === 'get' || request.operation === 'cancel') {
-        const run = await service.call('get', { run_id: request.args?.run_id });
+        const run = await current.call('get', { run_id: request.args?.run_id });
+        if (shuttingDown) throw shutdownError();
         if (run.main_actor !== request.session_id) throw new Error('Private pi-CAW Host cannot access another session’s Run');
         if (request.operation === 'get') return run;
       }
-      return service.call(request.operation, request.args,{human:['cleanup_run_history','run_retention'].includes(request.operation)});
+      return current.call(request.operation, request.args,{human:['cleanup_run_history','run_retention'].includes(request.operation)});
     })().then(request.resolve, request.reject);
   });
   const releaseLifecycle = pi.events.on('pi-caw:run-lifecycle', (value: unknown) => {
@@ -58,9 +73,63 @@ export default function piCaw(pi: ExtensionAPI) {
     const query=value as {session_id:string;prompt?:string;owned:boolean};
     if(service?.host.main.ownsPrompt(query.prompt, query.session_id)) query.owned = true;
   });
+  const shutdownError = () => Object.assign(new Error('pi-CAW extension is shutting down; initialization cannot publish a service'), { code: 'PI_CAW_SHUTTING_DOWN' });
+  const lifecycleCode = (error: unknown) => {
+    const code = (error as { code?: unknown } | null)?.code;
+    return typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(code) ? code
+      : error instanceof AggregateError ? 'AGGREGATE_ERROR' : 'INITIALIZATION_OR_CLEANUP_ERROR';
+  };
+  const traceLifecycle = (trace: { lifecycle_id: string; pid: number; session_id: string } | undefined, phase: string, error?: unknown) => {
+    console.info('[pi-CAW] extension lifecycle', { ...trace, phase, ...(phase.endsWith('_failed') ? { code: lifecycleCode(error) } : {}) });
+  };
+  async function closeOwnedService() {
+    const owner = ownedService;
+    const trace = ownedServiceTrace;
+    if (!owner) return;
+    ownedServiceClose ??= Promise.resolve().then(async () => {
+      traceLifecycle(trace, 'cleanup_started');
+      try { await owner.close(); }
+      catch (error) { traceLifecycle(trace, 'cleanup_failed', error); throw error; }
+      traceLifecycle(trace, 'cleanup_complete');
+      if (ownedService === owner) ownedService = undefined;
+      if (service === owner) service = undefined;
+    });
+    await ownedServiceClose;
+  }
+  async function initializeWorkbench(current: PiCawService) {
+    if (shuttingDown) throw shutdownError();
+    if (workbench) return workbench;
+    if (workbenchOpening) return workbenchOpening;
+    const opening = Promise.resolve().then(async () => {
+      if (shuttingDown) {
+        const error = shutdownError();
+        workbenchOpeningCancellation = { opening, error };
+        throw error;
+      }
+      const opened = await openWorkbench(current);
+      // Even a late result remains owned so shutdown can close its server.
+      workbench = opened;
+      return opened;
+    });
+    workbenchOpening = opening;
+    try { return await opening; }
+    finally { if (workbenchOpening === opening && !workbench) workbenchOpening = undefined; }
+  }
+  async function closeOwnedWorkbench() {
+    const owner = workbench;
+    if (!owner) return;
+    workbenchClose ??= Promise.resolve().then(async () => {
+      await owner.close();
+      if (workbench === owner) workbench = undefined;
+    });
+    await workbenchClose;
+  }
   async function initialize(ctx: ExtensionContext) {
     context = ctx;
+    if (shuttingDown) throw shutdownError();
     if (service) return service;
+    if (initialization) return initialization;
+    const starting = (async () => {
     const agentDir = sdk.getAgentDir();
     const runtimeRequest: { binding?: Record<string, unknown>; error?: Error } = {};
     pi.events.emit('pi-caw:sdk-runtime', runtimeRequest);
@@ -88,7 +157,7 @@ export default function piCaw(pi: ExtensionAPI) {
         (sessionId: string) => admissionRequiredSessions.add(sessionId)),
       deliverMain: (prompt: string) => pi.sendUserMessage(prompt, { deliverAs: 'followUp' }),
       emit: (name: string, data: unknown) => pi.events.emit(name, data) });
-    service = await new PiCawService({ directory: resolveStateDirectory(agentDir), host,
+    const candidate = new PiCawService({ directory: resolveStateDirectory(agentDir), host,
       notify: (event: unknown) => {
         const deliveryId = (event as { delivery_id?: string }).delivery_id;
         if (deliveryId && context.sessionManager.getEntries().some((entry: any) => {
@@ -100,15 +169,41 @@ export default function piCaw(pi: ExtensionAPI) {
         pi.sendMessage({ customType: 'pi-caw:completion', content: JSON.stringify(event), display: true },
           { deliverAs: 'followUp', triggerTurn: completion.notification_context?.authoring !== true && !domainRuns.has(completion.run_id ?? '') });
       },
-    }).initialize();
-    return service;
+    });
+    // Ownership begins before initialization can create timers or acquire
+    // maintenance references. Readiness is published only after success.
+    ownedService = candidate; ownedServiceClose = undefined;
+    const trace = { lifecycle_id: randomUUID(), pid: process.pid, session_id: ctx.sessionManager.getSessionId() };
+    ownedServiceTrace = trace;
+    traceLifecycle(trace, 'init_started');
+    try {
+      await candidate.initialize();
+      if (shuttingDown) throw shutdownError();
+      service = candidate;
+      traceLifecycle(trace, 'init_ready');
+      return candidate;
+    } catch (error) {
+      traceLifecycle(trace, 'init_failed', error);
+      try { await closeOwnedService(); }
+      catch (cleanupError) { throw new AggregateError([error, cleanupError], 'pi-CAW initialization failed and owned service shutdown is unconfirmed'); }
+      throw error;
+    }
+    })();
+    initialization = starting;
+    try { return await starting; }
+    finally {
+      // An unconfirmed close keeps this exact failed owner/promise fenced.
+      if (initialization === starting && !ownedService) initialization = undefined;
+    }
   }
   pi.on('session_start', async (_event, ctx) => {
-    await initialize(ctx); service?.host.main.sessionChanged();
+    const current = await initialize(ctx);
+    if (shuttingDown) throw shutdownError();
+    current.host.main.sessionChanged();
     pi.events.emit('pi-caw:host-ready', { session_id: ctx.sessionManager.getSessionId() });
   });
   pi.on('model_select', async (_event, ctx) => { context = ctx; });
-  pi.on('context',async event=>({messages:event.messages.filter((message:any)=>message.role!=='custom' || message.customType!=='pi-caw:status')}));
+  pi.on('context',async event=>({messages:projectWorkflowContext(event.messages)}));
   pi.on('before_agent_start', async (event, ctx) => {
     context = ctx; const instruction = service?.host.main.begin(event.prompt);
     if (instruction) return { systemPrompt: `${event.systemPrompt}\n${instruction}` };
@@ -126,17 +221,45 @@ export default function piCaw(pi: ExtensionAPI) {
   pi.on('tool_call', async (event, ctx) => { context = ctx; return service?.host.main.guard(event); });
   pi.on('agent_end', async (_event, ctx) => { context = ctx; await service?.host.main.end(); });
   pi.on('session_shutdown', async () => {
+    if (shutdown) return shutdown;
+    shuttingDown = true;
     releaseFeedback();releaseLifecycle(); releaseMainQuery(); releaseHostCommand(); releaseHostReadiness();
-    if (workbench) await workbench.close();
-    if (service) await service.close();
-    workbench = undefined; service = undefined;
+    shutdown = (async () => {
+      const failures: unknown[] = [];
+      const opening = workbenchOpening;
+      try { await opening; }
+      catch (error) {
+        // Only this exact pre-open admission cancellation owns no server.
+        // An external open failure, even with the same code, remains visible.
+        if (!workbenchOpeningCancellation || workbenchOpeningCancellation.opening !== opening
+          || workbenchOpeningCancellation.error !== error) failures.push(error);
+      }
+      try { await closeOwnedWorkbench(); }
+      catch (error) { failures.push(error); }
+      let initializationError: unknown;
+      let initializationFailed = false;
+      try { await initialization; }
+      catch (error) { initializationError = error; initializationFailed = true; }
+      try { await closeOwnedService(); }
+      catch (error) {
+        if (initializationFailed && initializationError !== error) failures.push(initializationError);
+        failures.push(error);
+      }
+      // Initialization errors already reach their callers. Successful owned
+      // cleanup, including after such an error, is the shutdown proof.
+      if (failures.length) throw new AggregateError(failures, 'pi-CAW extension shutdown is unconfirmed');
+      service = undefined;
+    })();
+    return shutdown;
   });
   pi.registerCommand('caw', { description: 'Open pi-CAW Workbench; configure explicit Pi model bindings',
     handler: async (_args, ctx) => {
       const current = await initialize(ctx);
-      workbench ??= await openWorkbench(current);
-      ctx.ui.notify(`pi-CAW: ${workbench.url}`, 'info');
-      pi.events.emit('pi-caw:open-workbench', { url: workbench.url });
+      if (shuttingDown) throw shutdownError();
+      const opened = await initializeWorkbench(current);
+      if (shuttingDown) throw shutdownError();
+      ctx.ui.notify(`pi-CAW: ${opened.url}`, 'info');
+      pi.events.emit('pi-caw:open-workbench', { url: opened.url });
     },
   });
   pi.registerTool({
@@ -146,7 +269,18 @@ export default function piCaw(pi: ExtensionAPI) {
       args: Type.Optional(Type.Record(Type.String(), Type.Unknown())) }),
     async execute(id, params, _signal, _update, ctx) {
       const current = await initialize(ctx);
+      if (shuttingDown) throw shutdownError();
       const args = { ...params.args };
+      if(params.action==='recover_run_admission'){
+        const detail=JSON.stringify(args.records);
+        if(typeof args.run_id!=='string'||typeof detail!=='string'||Buffer.byteLength(detail)>65536)throw new Error('Admission operation requires one exact Run and bounded inspected records');
+        const accepted=await ctx.ui.confirm('Recover inspected Run admission ownership',
+          `Run: ${args.run_id}\n${detail}\nOnly selected unchanged records with confirmed absent owners are retired. Business state and execution stay unchanged.`);
+        if(!accepted)throw Object.assign(new Error('Human admission authorization was not granted'),{code:'HUMAN_RECOVERY_REQUIRED'});
+        if (shuttingDown) throw shutdownError();
+        const result=await current.call(params.action,args,{human:true,signal:_signal});
+        return {content:[{type:'text',text:JSON.stringify(result)}],details:{kind:'pi-caw',action:params.action}};
+      }
       if (params.action === 'run' || params.action === 'launch_role') args.workspace ??= ctx.cwd;
       const result = params.action === 'main_task' ? current.host.main.packet()
         : params.action === 'main_resource' ? await current.host.main.readResource(args)

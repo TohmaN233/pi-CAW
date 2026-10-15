@@ -36,18 +36,22 @@ test('a missing store and an existing Run with a missing journal are not RUN_NOT
   await assert.rejects(f.service.call('get', { run_id: 'incomplete-run' }), cause => cause.code !== 'RUN_NOT_FOUND');
 });
 
-test('existing Run pins/resources corruption and controller authorization remain errors', async t => {
+test('Run reads validate pins and authority while explicit audits validate resource bytes', async t => {
   const f = await fixture(t);
   await f.service.call('create_workflow', { workflow: workflow(), resources: { 'instructions/test.md': 'pinned bytes' } });
   const started = await f.service.call('run', { workflow_id: 'example', workspace: f.workspace, access: 'read_only', inputs: { task: 'read evidence' } });
   await settle(f.service, started.run_id);
   const directory = f.service.runtime.runs.directory(started.run_id), pinsPath = join(directory, 'pins.json');
   const bytes = await readFile(pinsPath), pins = JSON.parse(bytes);
-  for (const path of [pinsPath, join(directory, 'objects', pins.resources[0].sha256)]) {
-    const original = await readFile(path); await unlink(path);
-    try { await assert.rejects(f.service.call('get', { run_id: started.run_id }), { code: 'ENOENT' }); }
-    finally { await writeFile(path, original); }
-  }
+  await unlink(pinsPath);
+  try { await assert.rejects(f.service.call('get', { run_id: started.run_id }), { code: 'ENOENT' }); }
+  finally { await writeFile(pinsPath, bytes); }
+  const resourcePath = join(directory, 'objects', pins.resources[0].sha256);
+  const resourceBytes = await readFile(resourcePath); await unlink(resourcePath);
+  try {
+    assert.equal((await f.service.call('get', { run_id: started.run_id })).run_id, started.run_id);
+    await assert.rejects(f.service.runtime.runs.audit(started.run_id), { code: 'ENOENT' });
+  } finally { await writeFile(resourcePath, resourceBytes); }
   await assert.rejects(f.service.call('run_snapshot', { run_id: started.run_id, control_token: 'wrong-token' }), cause => {
     assert.notEqual(cause.code, 'RUN_NOT_FOUND'); assert.match(cause.message, /control|authority/i); return true;
   });

@@ -3,11 +3,10 @@ import { repairGeneration } from './generation-repair.mjs';
 import { generationProgress } from './generation-progress.mjs';
 import { leaseToken } from '../workflow-execution-envelope.mjs';
 import { requireValue } from '../workflow-paths.mjs';
-import { decodeGeneratedProposal } from './expansion-run.mjs';
 import { canonicalJSON, digest } from '../workflow-revisions.mjs';
 import { validateGenerationProposal } from './proposal-validation.mjs';
-import { isGenerationContractFailure, semanticGenerationRepair } from './generation-retry-policy.mjs';
-import { MAX_AUTHORING_REVIEW_RESOURCE_BYTES, authoringDependencyAssessmentRequired, authoringReviewIdentity, isAuthoringRunProvenance } from '../authoring/authoring-workflows.mjs';
+import { isGenerationContractFailure, semanticGenerationRepair, generationReviewRepairOwner } from './generation-retry-policy.mjs';
+import { MAX_AUTHORING_REVIEW_RESOURCE_BYTES, authoringReviewIdentity, isAuthoringRunProvenance } from '../authoring/authoring-workflows.mjs';
 import {selectRetainedAuthoringAttempt,retainedAuthoringReplaySource} from './retained-authoring-plan.mjs';
 
 const hasChecklistReview = version => Number.isInteger(version) && version >= 2;
@@ -71,7 +70,6 @@ export async function advanceGeneration(service, runtime, executor, args, {store
   let {state,pins} = record;
   requireValue(isAuthoringRunProvenance(pins.root.provenance), 'GENERATION_RUN', 'Generation requires a pinned authoring Workflow Run');
   const source = {workflow_id:pins.root.provenance.source_workflow_id,expected_revision:pins.root.provenance.source_revision};
-  const proposal = () => decodeGeneratedProposal(state.nodes.expand.output?.host_pipeline?{proposal:state.nodes.expand.output.proposal}:state.nodes.expand.output, source.expected_revision, {requirePlanningAnalysis:pins.root.provenance.routing_rules?.selection_mode === 'automatic',requireSourceDispositions:(pins.root.provenance.review_contract_version ?? 1)>=8,requireRuntimeDependencies:authoringDependencyAssessmentRequired(pins.root.workflow.authoring?.contract)});
   for (const nodeId of ['expand','graph_assembly','execution_binding','deterministic_validation','final']) {
     record=await runtime.runs.read(args.run_id);({state,pins}=record);
     if (state.status === 'succeeded') return {phase:'ready_to_apply',source};
@@ -120,14 +118,14 @@ export async function advanceGeneration(service, runtime, executor, args, {store
       const pack = await store.snapshot(source.workflow_id,source.expected_revision);
       const resources = await store.resources(source.workflow_id,pack.revision_hash);
       let review;
-      const decoded=proposal();
+      const validated=validateGenerationProposal(state.nodes.expand.output,{pack,resources,provenance:pins.root.provenance,context});
+      const decoded=validated.proposal;
       try {review=hasChecklistReview(pins.root.provenance.review_contract_version)?evaluateReview(result.completion.structured_output,decoded,resources,{version:pins.root.provenance.review_contract_version}):result.completion.structured_output;}
       catch(error){if(error.code!=='GENERATION_CHECKLIST_INVALID')throw error;return {phase:'attention',status:'review_protocol_error',error:{code:error.code,message:error.message,retry_class:'mechanical',automatic_retry:false}};}
       if(pins.generation?.settings && (review.approved!==true || review.findings.length)) {
-        if(review.semantic_findings.length) return repairGeneration(runtime,args,record,{code:'GENERATION_REVIEW_FINDINGS',findings:review.semantic_repair_targets?.length?review.semantic_repair_targets:review.semantic_findings});
-        return {phase:'attention',status:'host_review_findings',error:{code:'GENERATION_HOST_REVIEW_FINDINGS',message:'Reviewer found only Host-owned projection, routing or evidence problems. Another semantic planner attempt cannot repair them.',findings:review.host_findings,retry_class:'mechanical',automatic_retry:false}};
+        if(generationReviewRepairOwner(review)==='planner') return repairGeneration(runtime,args,record,{code:'GENERATION_REVIEW_FINDINGS',findings:review.semantic_repair_targets?.length?review.semantic_repair_targets:review.semantic_findings});
+        return {phase:'attention',status:'host_review_findings',error:{code:'GENERATION_HOST_REVIEW_FINDINGS',message:'Reviewer found Host-owned projection, routing or evidence problems. Resolve these before another semantic planner attempt; pending semantic findings are retained.',findings:review.host_findings,semantic_findings:review.semantic_findings,semantic_repair_targets:review.semantic_repair_targets??[],retry_class:'mechanical',automatic_retry:false}};
       }
-      const validated=validateGenerationProposal(state.nodes.expand.output,{pack,resources,provenance:pins.root.provenance,context});
       return {phase:'review_required',source,proposal:validated.proposal,workflow:validated.compiled.workflow,validation:validated.compiled.validation,review:{...result.completion,structured_output:review}};
     }
     const live = await service.strictManager.status(runtime,args.run_id,lease);

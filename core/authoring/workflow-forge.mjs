@@ -2,7 +2,8 @@ import { compileSemanticLoops, sourceRepairLoopIntentFindings } from './semantic
 import { requireValue } from '../workflow-paths.mjs';
 import { compileExpansion } from '../skill-import/semantic-expander.mjs';
 import { sourceSectionInventory } from '../skill-import/source-dispositions.mjs';
-import { hostPreparationObservationEvidence, observedSourceRequirements } from '../skill-import/source-requirements.mjs';
+import { sourceResourceMentions } from '../skill-import/source-resource-mentions.mjs';
+import { callableSourceRequirements, hostPreparationObservationEvidence, observedSourceRequirements } from '../skill-import/source-requirements.mjs';
 import { sourceContractMap } from '../skill-import/source-contracts.mjs';
 import { disjointSourceSpans } from '../skill-import/source-evidence.mjs';
 import { authoringSourcePath } from '../skill-import/authoring-source.mjs';
@@ -236,10 +237,16 @@ export function lowerSemanticBlueprint(pack,resources,rawBlueprint,context={}){
   if(rawBlueprint?.contract===SEMANTIC_BLUEPRINT_CONTRACT)rawBlueprint=assertSemanticBlueprint(rawBlueprint,blueprintOptions);
   const blueprint=validateBlueprint(inflateBlueprint(normalizeSemanticBlueprint(rawBlueprint,blueprintOptions)),resources),resolveType=dataTypeResolver(blueprint.data_types ?? []);
   const inventory=new Map(sourceSectionInventory(resources).map(item=>[item.section_id,item]));
-  const observed=new Map(observedSourceRequirements(resources).map(item=>[item.requirement_id,item]));
+  const callableRequirements=context.callable_inventory_policy===true?(context.host_callable_requirements??callableSourceRequirements(resources)):[];
+  const observed=new Map([...observedSourceRequirements(resources,{source_resource_policy:context.callable_inventory_policy===true}),...callableRequirements].map(item=>[item.requirement_id,item]));
   const entrypoint=authoringSourcePath(resources),entryLines=Buffer.from(resources[entrypoint] ?? '').toString('utf8').split('\n');
   const supporting=Object.keys(resources).filter(path=>path!==entrypoint);
-  const resourceRefsForSections=ids=>[...new Set(ids.flatMap(id=>{const section=inventory.get(id);if(!section||section.source_span.resource!==entrypoint)return [];const text=entryLines.slice(section.source_span.start_line-1,section.source_span.end_line).join('\n').replaceAll('\\','/');return supporting.filter(path=>{const relative=path.startsWith('source/')?path.slice(7):path;return text.includes(path)||text.includes(relative);});}))];
+  const resourceRefsForSections=ids=>[...new Set(ids.flatMap(id=>{
+    const section=inventory.get(id);if(!section||section.source_span.resource!==entrypoint)return [];
+    const text=entryLines.slice(section.source_span.start_line-1,section.source_span.end_line).join('\n');
+    if(context.callable_inventory_policy!==true){const normalized=text.replaceAll('\\','/');return supporting.filter(path=>normalized.includes(path)||normalized.includes(path.startsWith('source/')?path.slice(7):path));}
+    return sourceResourceMentions(text,supporting).filter(item=>item.retained).map(item=>item.resource);
+  }))];
   const routing=context.routing_rules;
   const loopIds=new Map((blueprint.loops??[]).map((item,index)=>[item.key,`loop_${String(index+1).padStart(3,'0')}`]));
   const nodes=[],edges=[],stageIds=new Map(),activityIds=new Map(),activityOutputs=new Map(),compiledBlocks=new Map(),compilingBlocks=new Set(),edgeKeys=new Set(),approvalBindings=[];
@@ -617,7 +624,7 @@ export function lowerSemanticBlueprint(pack,resources,rawBlueprint,context={}){
     const disposition=source_dispositions.find(entry=>entry.section_id===item.source_section);
     if(disposition)disposition.requirement_ids=[...new Set([...disposition.requirement_ids,runtimeDependencies.requirements[index].requirement_id])];
   }
-  const proposal={source_revision:pack.revision_hash,source_requirements:[...rules,...runtimeDependencies.requirements],requirement_mappings:[...mappings,...runtimeDependencies.mappings],source_dispositions,required_executables:[],planning_analysis:{parallelism:'Host-derived from nested semantic blocks.',main_responsibilities:'Host-derived from activity ownership.',human_intervention:'Host-derived from approval blocks.'},nodes,edges,...(loops.length?{loops}:{})};
+  const proposal={source_revision:pack.revision_hash,source_requirements:[...rules,...runtimeDependencies.requirements,...callableRequirements],requirement_mappings:[...mappings,...runtimeDependencies.mappings],source_dispositions,required_executables:[],planning_analysis:{parallelism:'Host-derived from nested semantic blocks.',main_responsibilities:'Host-derived from activity ownership.',human_intervention:'Host-derived from approval blocks.'},nodes,edges,...(loops.length?{loops}:{})};
   const loopIntentFindings=sourceRepairLoopIntentFindings(proposal,resources);
   requireValue(loopIntentFindings.length===0,'AUTHORING_SEMANTIC','The graph does not preserve the explicit source repair-loop contract',{findings:loopIntentFindings});
   return proposal;

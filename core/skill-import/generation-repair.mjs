@@ -7,7 +7,7 @@ import { MAX_AUTHORING_ATTEMPTS, MAX_PLANNER_ATTEMPTS } from './generation-retry
 import { authoringDependencyAssessmentRequired, isAuthoringRunProvenance } from '../authoring/authoring-workflows.mjs';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { observedSourceRequirements } from './source-requirements.mjs';
+import { authoringSourceRequirements } from './source-requirements.mjs';
 
 // The ordinary driver must use the Run's immutable source bytes, including the
 // entrypoint omitted from model resource manifests, rather than a live source.
@@ -21,7 +21,7 @@ export async function pinnedAuthoringSourceRequirements(runtime,record){
     requireValue(bytes.length===resource.bytes&&digest(bytes)===resource.sha256,'RUN_RESOURCE_CORRUPT','Authoring source observation bytes differ from their Run pin');
     resources[resource.path]=bytes;
   }
-  return observedSourceRequirements(resources);
+  return authoringSourceRequirements(resources,{callable_inventory_policy:record.pins.root.provenance.callable_inventory_policy==='workflow-callable-inventory/v1'});
 }
 
 function proposalForRepair(state,pins) {

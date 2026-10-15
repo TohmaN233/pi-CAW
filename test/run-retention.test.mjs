@@ -23,7 +23,8 @@ test('completed retention defaults to 24h; manual cleanup keeps exact result and
  await s.runtime.runs.mutate(f.id,'recover',state=>{state.nodes.final.output={source:{path:output,sha256:'a'.repeat(64)}};});
  const result=await s.call('cleanup_run_history',{completed_now:true},{human:true});
  assert.equal(result.deleted.length,1);assert.ok(result.bytes>0);
- assert.deepEqual(await readdir(root),['delivered.tex','retained.json']);assert.equal(await readFile(output,'utf8'),'formal source');
+ assert.deepEqual(await readdir(root),['.admission-queue','.pending','delivered.tex','retained.json']);
+ assert.deepEqual(await readdir(join(root,'.admission-queue')),['.pending']);assert.deepEqual(await readdir(join(root,'.pending')),[]);assert.deepEqual(await readdir(join(root,'.admission-queue','.pending')),[]);assert.equal(await readFile(output,'utf8'),'formal source');
  const after=await s.call('get',{run_id:f.id});assert.equal(after.main_actor,before.main_actor);assert.equal(after.status,'succeeded');assert.equal(after.process_cleaned,true);
  assert.equal((await s.call('runs')).length,0);await assert.rejects(s.call('continue',{run_id:f.id}),{code:'RUN_RETIRED'});
  assert.equal((await s.retention.sweep({completed_now:true})).deleted.length,0);
@@ -42,7 +43,7 @@ test('confirmed failures clean immediately; terminal summary recovers an interru
  const r=await s.retention.sweep();assert.equal(r.deleted.length,1);
  const root=s.runtime.runs.directory(f.id),path=join(root,'retained.json'),summary=JSON.parse(await readFile(path,'utf8'));
  summary.cleanup_complete=false;await writeFile(path,JSON.stringify(summary));await mkdir(join(root,'objects'));await writeFile(join(root,'objects','leftover'),'large duplicated context');
- await s.retention.sweep();assert.deepEqual(await readdir(root),['retained.json']);assert.equal(JSON.parse(await readFile(path,'utf8')).cleanup_complete,true);
+ await s.retention.sweep();assert.deepEqual(await readdir(root),['.admission-queue','.pending','retained.json']);assert.deepEqual(await readdir(join(root,'.admission-queue')),['.pending']);assert.deepEqual(await readdir(join(root,'.pending')),[]);assert.deepEqual(await readdir(join(root,'.admission-queue','.pending')),[]);assert.equal(JSON.parse(await readFile(path,'utf8')).cleanup_complete,true);
 });
 test('feedback has readable status and artifact links, no prompt or context dump; progress deduplicates',async t=>{
  const f=await finished(t),events=[];f.host.emit=(name,event)=>events.push({name,event});
@@ -72,14 +73,46 @@ test('an interrupted historical cleanup intent cannot delete a native persistent
  const {digest}=await import('../core/workflow-revisions.mjs');summary.cleanup_complete=false;summary.execution_files=[{path:file,sha256:digest(data),bytes:data.length}];
  await writeFile(path,JSON.stringify(summary));await s.retention.sweep();assert.deepEqual(await readFile(file),data);
 });
-test('a terminal cleanup recovers only an absent writer; orphan failed authoring jobs clean without touching installed workflows',async t=>{
+test('orphan writers require exact explicit recovery; failed authoring jobs clean without touching installed workflows',async t=>{
  const f=await finished(t),s=f.service;await s.runtime.runs.mutate(f.id,'fail',state=>{state.status='failed';});
  const child=spawn(process.execPath,['-e',''],{windowsHide:true});await new Promise((done,reject)=>{child.on('error',reject);child.on('exit',done);});
  await writeFile(join(s.runtime.runs.directory(f.id),'.writer.lock'),JSON.stringify({pid:child.pid,token:randomUUID(),created_at:new Date().toISOString()}));
  const jobs=await new WorkflowStore(join(s.directory,'authoring-jobs'),{validationContext:s.runtime.context}).initialize();
  await jobs.create(workflow(),{provenance:{kind:'authoring_workflow_run'}});
+ const beforeOwner=await readFile(join(s.runtime.runs.directory(f.id),'.writer.lock')),beforePins=await readFile(join(s.runtime.runs.directory(f.id),'pins.json'));
+ const protectedResult=await s.retention.sweep();assert.deepEqual(protectedResult.protected,[{run_id:f.id,reason:'active_writer'}]);assert.equal(protectedResult.deleted.length,0);
+ assert.deepEqual(await readFile(join(s.runtime.runs.directory(f.id),'.writer.lock')),beforeOwner);assert.deepEqual(await readFile(join(s.runtime.runs.directory(f.id),'pins.json')),beforePins);
+ assert.equal((await s.runtime.runs.observe(f.id)).state.status,'failed');
+ const writer=new WorkflowStore(s.runtime.runs.directory(f.id)),owner=await writer.inspectWriter();
+ assert.ok(owner);assert.ok(await jobs.snapshot('example'));await writer.recoverWriter(owner.token);
  const result=await s.retention.sweep();assert.equal(result.deleted.length,1);
  await assert.rejects(jobs.snapshot('example'),{code:'ENOENT'});assert.equal((await s.store.snapshot('example')).workflow.id,'example');
+});
+
+test('orphan admission tickets protect terminal cleanup while observation and human exact recovery remain available',async t=>{
+ const f=await finished(t),s=f.service,root=s.runtime.runs.directory(f.id);await s.runtime.runs.mutate(f.id,'fail',state=>{state.status='failed';});
+ const child=spawn(process.execPath,['-e',''],{windowsHide:true});await new Promise((done,reject)=>{child.on('error',reject);child.on('exit',done);});
+ const owner={id:randomUUID(),pid:child.pid,token:randomUUID(),created_at:new Date().toISOString(),number:1};
+ const path=join(root,'.admission-queue',`ticket-${owner.id}.json`);await writeFile(path,JSON.stringify(owner));
+ const before=await readFile(join(root,'events.jsonl')),pins=await readFile(join(root,'pins.json'));
+ const result=await s.retention.sweep();assert.deepEqual(result.protected,[{run_id:f.id,reason:'pending_admission'}]);assert.equal(result.deleted.length,0);
+ assert.equal(await readFile(path,'utf8'),JSON.stringify(owner));assert.deepEqual(await readFile(join(root,'events.jsonl')),before);assert.deepEqual(await readFile(join(root,'pins.json')),pins);
+ assert.equal((await s.call('runs')).find(item=>item.run_id===f.id).status,'failed');
+ const report=await s.call('inspect_run_admission',{run_id:f.id},{human:true});await s.call('recover_run_admission',{run_id:f.id,records:report.records},{human:true});
+ assert.equal((await s.retention.sweep()).deleted.length,1);
+});
+
+test('new pending admission after cleanup preparation protects retained intent and remains human-recoverable',async t=>{
+ const f=await finished(t),s=f.service,root=s.runtime.runs.directory(f.id);await s.runtime.runs.mutate(f.id,'fail',state=>{state.status='failed';});
+ const child=spawn(process.execPath,['-e',''],{windowsHide:true});await new Promise((done,reject)=>{child.on('error',reject);child.on('exit',done);});
+ const owner={id:randomUUID(),pid:child.pid,token:randomUUID(),created_at:new Date().toISOString(),number:1},path=join(root,'.admission-queue',`ticket-${owner.id}.json`);
+ const finish=s.retention.finishTrim.bind(s.retention);let injected=false;
+ s.retention.finishTrim=async(id,summary)=>{if(!injected){injected=true;await writeFile(path,JSON.stringify(owner));}return finish(id,summary);};
+ const before=await readFile(join(root,'events.jsonl')),pins=await readFile(join(root,'pins.json')),result=await s.retention.sweep();
+ assert.equal(result.deleted.length,0);assert.deepEqual(result.protected,[{run_id:f.id,reason:'pending_admission'}]);assert.equal((await s.runtime.runs.retained(f.id)).cleanup_complete,false);
+ assert.deepEqual(await readFile(join(root,'events.jsonl')),before);assert.deepEqual(await readFile(join(root,'pins.json')),pins);
+ await assert.rejects(s.runtime.runs.observe(f.id),{code:'RUN_RETIRED'});const report=await s.call('inspect_run_admission',{run_id:f.id});
+ await s.call('recover_run_admission',{run_id:f.id,records:report.records},{human:true});await s.retention.sweep();assert.equal((await s.runtime.runs.retained(f.id)).cleanup_complete,true);
 });
 test('manual immediate cleanup queues after an automatic sweep and keeps its own policy',async t=>{
  const f=await finished(t),retention=f.service.retention,original=retention.execute.bind(retention);let release;

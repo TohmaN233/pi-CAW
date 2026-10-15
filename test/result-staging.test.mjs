@@ -7,6 +7,32 @@ const schema = { type: 'object', required: ['result'], additionalProperties: fal
 const validate = async value => validateData(value, schema);
 const state = () => ({ submission: null, staged: null });
 
+test('missing submission metadata reports that no body was saved and permits a correct full submission', async () => {
+  const current = state(), body = { result: { title: 'kept' } };
+  await assert.rejects(acceptSemanticResult(current, { output: body }, validate), error =>
+    error.code === 'PI_RESULT_SUMMARY' && /No body is staged/.test(error.message) && /summary.*result/.test(error.message));
+  await assert.rejects(acceptSemanticResult(current, { summary: 'ready', output: body }, validate), error =>
+    error.code === 'PI_RESULT_BODY' && /result.*not.*output/.test(error.message));
+  await assert.rejects(acceptSemanticResult(current, { summary: 'ready', stage_id: 'invented', patch: [{op:'reset'}] }, validate), error =>
+    error.code === 'PI_RESULT_STAGE_MISSING' && /No body is staged/.test(error.message) && !/Do not.*resend/.test(error.message));
+  assert.equal(current.staged,null);
+  await acceptSemanticResult(current,{summary:'ready',result:body},validate);
+  assert.deepEqual(current.submission,{summary:'ready',result:body});
+});
+
+test('wrong stage identity reports the actual retained stage and preserves its body',async()=>{
+  const current=state();
+  await assert.rejects(acceptSemanticResult(current,{summary:'draft',result:{draft:'retained'}},validate));
+  const id=current.staged.id;
+  await assert.rejects(acceptSemanticResult(current,{summary:'fixed',stage_id:'invented',patch:[{op:'reset'}]},validate),error=>error.code==='PI_RESULT_STAGE_MISSING'&&error.message.includes(id));
+  assert.equal(current.staged.id,id);assert.equal(current.staged.result.draft,'retained');
+});
+
+test('staged validation errors retain their actual cause for semantic versus Host classification',async()=>{
+  const current=state(),cause=Object.assign(new Error('Lease expired'),{code:'LEASE_EXPIRED'});
+  await assert.rejects(acceptSemanticResult(current,{summary:'ready',result:{}},async()=>{throw cause;}),error=>error.code==='PI_RESULT_STAGED'&&error.cause===cause);
+});
+
 test('an invalid body is staged and is not an official result', async () => {
   const current = state();
   await assert.rejects(acceptSemanticResult(current, { summary: 'draft', result: { draft: { title: 'kept' } } }, validate),
@@ -76,4 +102,14 @@ test('a patch cannot smuggle the body back as its value', async () => {
     patch: [{ op: 'set', path: '/note', value: 'y'.repeat(5000) }],
   }, validate), error => error.code === 'PI_RESULT_PATCH');
   assert.equal(current.submission, null);
+});
+
+test('nested array corrections preserve large staged siblings and reject nonexisting indices',async()=>{
+  const current=state(),schema={type:'object',properties:{items:{type:'array',items:{type:'object',properties:{result:{type:'object',properties:{title:{type:'string'},large:{type:'string'}},required:['title','large'],additionalProperties:false}},required:['result'],additionalProperties:false}}},required:['items'],additionalProperties:false};
+  const validate=value=>validateData(value,schema),large='Exact large sibling '.repeat(3000);
+  await assert.rejects(acceptSemanticResult(current,{summary:'stage nested',result:{items:[{result:{title:42,large}},{result:{title:'keep',large}}]}},validate),{code:'PI_RESULT_STAGED'});
+  const stage_id=current.staged.id;
+  for(const index of ['2','-1','01','9999999999999999999999999','-'])await assert.rejects(acceptSemanticResult(current,{summary:'bad index',stage_id,patch:[{op:'set',path:`/items/${index}/result/title`,value:'fixed'}]},validate),{code:'PI_RESULT_PATCH'});
+  await acceptSemanticResult(current,{summary:'correct nested',stage_id,patch:[{op:'set',path:'/items/0/result/title',value:'fixed'}]},validate);
+  assert.equal(current.submission.result.items[0].result.title,'fixed');assert.equal(current.submission.result.items[0].result.large,large);assert.deepEqual(current.submission.result.items[1].result,{title:'keep',large});
 });

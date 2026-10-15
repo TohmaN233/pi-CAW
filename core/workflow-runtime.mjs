@@ -1,6 +1,7 @@
+import { providersForWorkflow } from './workflow-provider-bindings.mjs';
 import {discoverRuntimeEnvironment, verifyRuntimeEnvironment} from './runtime-environment.mjs';
 import {normalizeExecutableRequirements} from './runtime-requirements.mjs';
-import {ensureRunRuntimeEnvironment,workspaceRuntimeDirectories} from './runtime-environment-state.mjs';
+import {ensureRunRuntimeEnvironment,workspaceRuntimeDirectories,nodeRuntimeScope,runtimeEnvironmentPathsHash} from './runtime-environment-state.mjs';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { HUMAN_GATE_OUTPUT } from './workflow-schema.mjs';
 import { mainExecutionMode } from './main-execution-mode.mjs';
@@ -8,6 +9,7 @@ import {effectiveSkillPolicy} from './workflow-reference-schema.mjs';
 import { join } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { WorkflowRunStore } from './workflow-run-store.mjs';
+import { admissionFailureDetails } from './admission-diagnostics.mjs';
 import { validateWorkflowGraph } from './workflow-validator.mjs';
 import { canonicalJSON, digest } from './workflow-revisions.mjs';
 import { noSymlinks, requireValue } from './workflow-paths.mjs';
@@ -31,6 +33,8 @@ import { assignFanoutItems, assignedFanoutIndices, assignedFanoutWritePaths, act
 import { semanticTurnsConsumed, currentRoundAttempts } from './execution/completion-turn-budget.mjs';
 import { loopRoundSignature, observeLoopItems, validateLoopExitOutput, validateLoopItemSources } from './workflow-loops.mjs';
 import { WORKSPACE_SOURCE_LOCATIONS, revalidateBoundSourceLocations, validateWorkspaceSourceLocations } from './workspace-source-locations.mjs';
+import { requireHostCompletionProof } from './execution/host-completion-check.mjs';
+import { inspectFanoutItem } from './execution/fanout-semantics.mjs';
 
 const CHILD_COMPLETION = Symbol('verified child completion');
 const AUTHORING_HUMAN_ACCEPTANCE = Symbol('verified authoring human acceptance');
@@ -41,7 +45,7 @@ const MANAGED_NATIVE_RESULT_IDENTITY = Object.freeze(['dispatch_id','result_inde
 function ownsNativeSlot(attempt,index,agentId) {
   const receipt=attempt.dispatch?.receipt;
   if(attempt.native_agents?.[index]===agentId)return true;
-  if(receipt?.executor!=='pi-sdk-subagent')return false;
+    if(!['pi-sdk-subagent','pi-isolated-main'].includes(receipt?.executor))return false;
   const assignments=receipt.subagent_plan?.assignments;
   return assignments?.some(item=>Object.hasOwn(item,'assignment_index'))
     ? assignments.some(item=>item.assignment_index===index&&item.dispatch_id===agentId)
@@ -122,7 +126,7 @@ export class WorkflowRuntime {
     let current = pins; let depth = 0;
     while (current.parent) {
       requireValue(++depth <= 32, 'SUBWORKFLOW_DEPTH', 'Invalid Run ancestry');
-      const link = current.parent; const parent = await this.runs.read(link.run_id);
+      const link = current.parent; const parent = await this.runs.readActive(link.run_id);
       const node = parent.state.nodes[link.node_id]; const attempt = node?.attempts.find(item => item.id === link.attempt_id);
       requireValue(parent.state.pins_hash === link.pins_hash && attempt?.child_run_id && attempt.child_run_id === current.child_run_id && node.active_attempt_id === attempt.id && ['claimed', 'running'].includes(node.status) && ['claimed', 'running'].includes(attempt.status), 'PARENT_LEASE_INACTIVE', 'The parent node no longer authorizes this child Run');
       requireValue(parent.state.status === 'running' || allowPaused && parent.state.status === 'paused', 'PARENT_RUN_INACTIVE', 'The parent Run blocks this child operation', { parent_run_id: link.run_id, parent_status: parent.state.status });
@@ -146,7 +150,7 @@ export class WorkflowRuntime {
     return result;
   }
 
-  async start({ environment_directories = [], workflow_id, revision_hash, inputs = {}, workspace, access, allowed_paths = [], constraints = {}, main_actor, require_approval = false, run_id = randomUUID() }, {preparedEnvironment} = {}) {
+  async start({ environment_directories = [], workflow_id, revision_hash, inputs = {}, workspace, access, allowed_paths = [], constraints = {}, main_actor, require_approval = false, run_id = randomUUID() }, {preparedEnvironment,executionContext=this.context} = {}) {
     this.executionAdmission?.assertRunActive(run_id);
     requireValue(typeof main_actor === 'string' && main_actor.length > 0 && main_actor.length <= 256, 'MAIN_ACTOR', 'Run requires one main actor');
     requireValue(typeof require_approval === 'boolean', 'RUN_APPROVAL', 'Run approval policy must be boolean');
@@ -157,27 +161,27 @@ export class WorkflowRuntime {
     if (!Object.hasOwn(inputs, 'project_root') && root.workflow.inputs_schema?.properties?.project_root?.type === 'string')
       inputs = { ...inputs, project_root: permissions.workspace };
     validateData(inputs, root.workflow.inputs_schema);
-    requireValue(root.workflow.status === 'ready' && root.workflow.enabled, 'WORKFLOW_LAUNCH_BLOCKED', 'Only enabled Ready Workflows may resolve execution dependencies', { validation: validateWorkflowGraph(root.workflow, this.context) });
+    requireValue(root.workflow.status === 'ready' && root.workflow.enabled, 'WORKFLOW_LAUNCH_BLOCKED', 'Only enabled Ready Workflows may resolve execution dependencies', { validation: validateWorkflowGraph(root.workflow, executionContext) });
     const closure = await resolveWorkflowPins(this.workflows, root);
     for(const pack of closure.packs)requireValue(!['skill_import','workflow_build'].includes(pack.provenance?.kind)
       &&!['coarse','authored'].includes(pack.workflow.import_status?.mode),'CONVERTED_DEPLOYMENT_REQUIRED','Private authoring seeds cannot enter normal runtime execution');
-    const checked = validateWorkflowGraph(root.workflow, { ...this.context, ...closure.context, check_runtime_requirements: true });
+    const checked = validateWorkflowGraph(root.workflow, { ...executionContext, ...closure.context, check_runtime_requirements: true });
     requireValue(checked.launch_ready, 'WORKFLOW_LAUNCH_BLOCKED', 'Workflow cannot start in the current environment', { validation: checked });
     for (const pack of closure.packs) for (const node of pack.workflow.nodes) if (EXECUTOR_NODES.has(node.type)) requireValue(this.supportedNodeTypes.has(node.type), 'EXECUTOR_UNSUPPORTED', `Node type has no qualified executor: ${node.type}`, { node_id: node.id });
     for (const skill of closure.skills) {
       requireValue(!skill.observations.length, 'SKILL_DEPENDENCY_UNRESOLVED', 'Linked Skill dependencies need review or inlining before execution', { path: skill.path, observations: skill.observations });
-      for (const [kind, names] of Object.entries(skill.requirements)) if (['tools', 'mcp_servers'].includes(kind)) requireValue(names.every(name => (this.context[kind] ?? []).includes(name)), 'SKILL_REQUIREMENT_UNAVAILABLE', 'Linked Skill requires an unavailable executor capability', { path: skill.path, kind, requirements: names });
+      for (const [kind, names] of Object.entries(skill.requirements)) if (['tools', 'mcp_servers'].includes(kind)) requireValue(names.every(name => (executionContext[kind] ?? []).includes(name)), 'SKILL_REQUIREMENT_UNAVAILABLE', 'Linked Skill requires an unavailable executor capability', { path: skill.path, kind, requirements: names });
     }
-    await this.beforeStart(closure, { run_id, workflow_id });
+    await this.beforeStart(closure, { run_id, workflow_id,executionContext });
     const requirements = {executables:normalizeExecutableRequirements([...closure.packs.flatMap(pack=>pack.workflow.requirements.executables??[]), ...closure.skills.flatMap(skill=>skill.requirements.executables??[])])};
     const environment = preparedEnvironment ?? await this.environmentResolver(requirements,{extraDirectories:environment_directories,knownDirectories:workspaceRuntimeDirectories(permissions.workspace)});
     requireValue(environment.status === 'ready','ENVIRONMENT_SETUP_REQUIRED','请先准备运行依赖：发现缺少的工具后询问用户是否安装，完成后重新检查。',{environment});
     constraints = {...constraints, runtime_requirements:requirements, runtime_environment:environment};
     const providerIds = new Set(closure.provider_ids);
-    const providers = (this.context.providers ?? []).filter(provider => providerIds.has(provider.id));
-    for (const pack of closure.packs) if (pack.workflow.skill_policy.mode === 'strict') requireValue(await this.strictCapability(pack, { skills: closure.skills, providers }), 'STRICT_UNAVAILABLE', 'No qualified Strict executor is available; imported Workflows cannot silently downgrade');
+    const providers = (executionContext.providers ?? []).filter(provider => providerIds.has(provider.id));
+    for (const pack of closure.packs) if (pack.workflow.skill_policy.mode === 'strict') requireValue(await this.strictCapability(pack, { skills: closure.skills, providers:providersForWorkflow(executionContext,pack.workflow) }), 'STRICT_UNAVAILABLE', 'No qualified Strict executor is available; imported Workflows cannot silently downgrade');
     const blobs = closure.blobs;
-    const pins = { schema_version: 1, thread_protocol_version: 2, ...(this.generationPolicy ? {generation:structuredClone(this.generationPolicy)} : {}), ...(this.authoringReviewer ? {authoring_reviewer:structuredClone(this.authoringReviewer)} : {}), root, providers: structuredClone(providers), children: closure.children, skills: closure.skills, resources: closure.resources };
+    const pins = { schema_version: 1, thread_protocol_version: 2, ...(this.generationPolicy ? {generation:structuredClone(this.generationPolicy)} : {}), ...(this.authoringReviewer ? {authoring_reviewer:structuredClone(this.authoringReviewer)} : {}), root, providers: structuredClone(providers), workflow_providers:structuredClone(executionContext.workflow_providers??{}),workflow_binding_revisions:structuredClone(executionContext.workflow_binding_revisions??{}), children: closure.children, skills: closure.skills, resources: closure.resources };
     const controlToken = randomBytes(32).toString('hex');
     const state = initialRunState({ runId: run_id, pinsHash: digest(canonicalJSON(pins)), pins, inputs: structuredClone(inputs), permissions, constraints: structuredClone(constraints), controlHash: digest(controlToken), mainActor: main_actor, requireApproval: require_approval });
     validateLoopItemSources(state, root.workflow, {allowUnavailable:true});
@@ -187,9 +191,11 @@ export class WorkflowRuntime {
       const toolContracts = hostToolContracts(scope.pack.workflow);
       for (const node of scope.pack.workflow.nodes) if (EXECUTOR_NODES.has(node.type)) {
         const effective = nodePermissions(node, scope.state);
-        if (node.executor?.kind === 'main' && (scope.pack.workflow.loops ?? []).some(loop => loop.exit_node === node.id))
+        if (node.executor?.kind === 'main' && (scope.pack.workflow.loops ?? []).some(loop => loop.exit_node === node.id && loop.review_context!=='current_main'))
           requireValue(mainExecutionMode(node, effectiveSkillPolicy(scope.pack.workflow.skill_policy, node.skill_policy), scope.state.constraints, scope.pack.workflow.id) === 'worker',
             'LOOP_REVIEW_CONTEXT', 'A Run cannot override a loop reviewer into its existing conversation', {node_id: node.id});
+        // current_main declares the source default. A frozen Run override may select an
+        // isolated Main worker; its initiating owner, read-only scope and acceptance gate remain.
         for(const required of node.required_artifacts??[]){
           const exact=pathBoundaries([required.path])[0];
           requireValue(effective.access==='bounded_write'&&effective.allowed_paths.some(boundary=>boundary==='.'||exact===boundary||exact.startsWith(boundary.replace(/\/$/,'')+'/')),
@@ -329,7 +335,7 @@ export class WorkflowRuntime {
   async recordExecutorEvent(runId, { node_id, attempt_id, lease_token, control_token, event }) {
     const fields = {
       pi_event: ['method', 'thread_id', 'turn_id', 'item_type', 'status', 'error_code', 'diagnostic', 'usage_available', 'input_tokens', 'cached_input_tokens', 'cache_write_input_tokens', 'output_tokens', 'reasoning_output_tokens'],
-      tool_operation: ['call_id', 'tool', 'root', 'path', 'phase', 'execution_session_id', 'sha256', 'before_sha256', 'after_sha256', 'source_sha256', 'entries', 'start_line', 'end_line', 'total_lines', 'start_byte', 'end_byte', 'total_bytes', 'complete', 'bytes', 'mime', 'code', 'diagnostic', 'program', 'cwd', 'args_sha256', 'arg_count', 'exit_code', 'signal', 'duration_ms'],
+      tool_operation: ['call_id', 'tool', 'root', 'path', 'phase', 'execution_session_id', 'sha256', 'before_sha256', 'after_sha256', 'source_sha256', 'entries', 'start_line', 'end_line', 'total_lines', 'start_byte', 'end_byte', 'total_bytes', 'complete', 'bytes', 'mime', 'code', 'diagnostic', 'program', 'cwd', 'args_sha256', 'arg_count', 'command_timeout_ms', 'exit_code', 'signal', 'duration_ms', 'broker_id','output_id','stream','next_byte','artifact','evidence_sha256','evidence_bytes'],
       profile_owned: ['home', 'receipt_home', 'executable_sha256', 'pid'],
       session_state: ['status', 'code', 'diagnostic'],
       model_catalog: ['requested_model', 'requested_effort', 'inventory_count', 'match_count', 'effort_supported', 'model_ids'],
@@ -345,17 +351,22 @@ export class WorkflowRuntime {
       native_agent_spawn_intent: ['index', 'agent_id', 'task_name'],
       native_agent_spawn: ['index', 'agent_id'],
       node_input_materials: ['index','inputs_path','prompt_sha256','input_count','manifest_sha256'],
+      node_inputs_prepared:['manifest_path','manifest_sha256','preparation_id','semantic_input_sha256','spilled_fields_sha256','spilled_count','prompt_input_bytes','inline_bytes'],
       native_prompt_delivery: ['dispatch_id','index','thread_id','turn_id','prompt_sha256','prompt_chars','input_sha256'],
       native_agent_followup_intent: ['index','agent_id','item_index','task_bundle_sha256','followup_kind','rejection_count'],
       native_agent_followup: [],
       semantic_blocked: ['correction', 'reason', 'thread_id', 'turn_id'],
       completion_invalid: ['correction', 'diagnostic', 'thread_id', 'turn_id'],
       required_artifacts_missing: ['correction', 'paths', 'thread_id', 'turn_id'],
+      shared_prefix_prepared:['artifact','sha256','bytes','transport_cache'],
     };
     requireValue(event && Object.hasOwn(fields, event.kind) && event.metadata && Object.keys(event.metadata).every(key => fields[event.kind].includes(key)) &&
       Object.values(event.metadata).every(value => value === null || typeof value === 'boolean' || typeof value === 'string' && value.length <= 4096 || Number.isSafeInteger(value)) &&
       Buffer.byteLength(canonicalJSON(event)) <= 32000,
       'EXECUTOR_EVENT_SCHEMA', 'Executor events accept bounded metadata only, never raw auth/model payloads');
+    if(event.kind==='tool_operation'&&Object.hasOwn(event.metadata,'command_timeout_ms'))requireValue(
+      Number.isSafeInteger(event.metadata.command_timeout_ms)&&event.metadata.command_timeout_ms>0&&event.metadata.command_timeout_ms<=3600000,
+      'EXECUTOR_EVENT_SCHEMA','Program deadline evidence must be a positive safe integer through one hour');
     if(event.kind==='tool_operation' && event.metadata.tool==='read_workflow_resource_range' && event.metadata.phase==='read') {
       const {start_line:start,end_line:end,total_lines:total,bytes}=event.metadata;
       requireValue([start,end,total,bytes].every(Number.isSafeInteger)&&start>=1&&end>=start&&end-start<200&&total>=end&&bytes>=0&&bytes<=32768,'EXECUTOR_EVENT_SCHEMA','Resource range evidence must contain bounded valid coverage');
@@ -380,7 +391,7 @@ export class WorkflowRuntime {
       attempt.executor_events = [...(attempt.executor_events ?? []).slice(-63), { sequence: attempt.executor_event_count, ...structuredClone(event) }];
       if(event.kind==='native_agent_spawn_intent'){
         const definition=pins.root.workflow.nodes.find(item=>item.id===node_id);
-        const provider=pins.providers.find(item=>item.id===definition?.executor?.provider_id);
+        const provider=providersForWorkflow(pins,pins.root.workflow).find(item=>item.id===definition?.executor?.provider_id);
         const count=resolvedSubagentPlan(definition,state)?.count??1;
         const {index,agent_id:id,task_name}=event.metadata;
         requireValue(provider?.kind==='native_agent'&&attempt.dispatch&&!attempt.dispatch.receipt&&
@@ -398,7 +409,7 @@ export class WorkflowRuntime {
       }
       if (event.kind === 'native_agent_spawn') {
         const definition = pins.root.workflow.nodes.find(item => item.id === node_id);
-        const provider = pins.providers.find(item => item.id === definition?.executor?.provider_id);
+        const provider = providersForWorkflow(pins,pins.root.workflow).find(item => item.id === definition?.executor?.provider_id);
         const plan = resolvedSubagentPlan(definition, state);
         const activeIndices=plan?activeFanoutAssignmentIndices(plan,definition.fanout,attempt.inherited_native_item_indices):[0];
         const { index, agent_id: id } = event.metadata;
@@ -589,12 +600,17 @@ export class WorkflowRuntime {
     return {sequence:record.sequence};
   }
   async execution(runId, { node_id, attempt_id, lease_token, control_token }, { allowInactive = false, allowPaused = false } = {}) {
-    const { state, pins } = await this.runs.read(runId); authorize(state, control_token);
+    const { state, pins } = await this.runs.readActive(runId); authorize(state, control_token);
     if (pins.parent) this.executionAdmission?.registerChild(pins.parent.run_id, runId, pins.parent.node_id, pins.parent.attempt_id);
     if (!allowInactive) await this.assertAncestors(pins, { allowPaused });
     const { attempt } = attemptFor(state, node_id, attempt_id, lease_token, { active: !allowInactive });
     requireValue(allowInactive || state.status === 'running' || allowPaused && state.status === 'paused', 'RUN_NOT_RUNNING', 'Run must be running before dispatch');
     const node = pins.root.workflow.nodes.find(item => item.id === node_id);
+    if(!allowInactive&&node.runtime_requirements){
+      const scope=nodeRuntimeScope(state,pins,node_id),binding=state.nodes[node_id].runtime_environment_binding;
+      requireValue(binding?.scope_sha256===scope.scope_sha256&&attempt.runtime_environment_scope?.paths_sha256===runtimeEnvironmentPathsHash(binding.environment),'ENVIRONMENT_BINDING_STALE','Scoped executable authority changed after claim');
+      await this.environmentVerifier(scope.requirements,binding.environment);
+    }
     // Source hashes gate first claim/dispatch, not reads during an admitted attempt:
     // its authorized edits can legitimately change the referenced files.
     return executionEnvelope(node, state, pins, attempt, lease_token);
@@ -643,7 +659,7 @@ export class WorkflowRuntime {
   async claimNode(runId, { node_id, owner, request_id, control_token, expected_sequence }, authority = null) {
     requireValue(typeof request_id === 'string' && request_id.length > 0 && request_id.length <= 128, 'CLAIM_REQUEST_ID', 'Claim needs a stable request ID');
     requireValue(typeof owner === 'string' && owner.length > 0 && owner.length <= 256, 'CLAIM_OWNER', 'Claim needs an executor owner');
-    const prepared = await this.ensureRuntimeEnvironment(runId, {control_token, expected_sequence});
+    const prepared = await this.ensureRuntimeEnvironment(runId, {control_token, expected_sequence,node_id});
     if (expected_sequence !== undefined) expected_sequence = prepared.sequence;
     const result = await this.transition(runId, 'claim', async (state, pins) => {
       authorize(state, control_token);
@@ -665,6 +681,8 @@ export class WorkflowRuntime {
       const id = randomUUID(); const token = leaseToken(control_token, runId, node_id, id);
       const attempt = { id, owner, started_at: new Date().toISOString(), claim_request_id: request_id, lease_hash: digest(token), status: 'claimed', dispatch: null, completion_hash: null, reconciliation: null,
         ...(definition.executor?.kind === 'main' ? { completion_turns: 0 } : {}) };
+      const scope=nodeRuntimeScope(state,pins,node_id);
+      if(scope)attempt.runtime_environment_scope={scope_sha256:scope.scope_sha256,paths_sha256:runtimeEnvironmentPathsHash(node.runtime_environment_binding.environment)};
       const signature = loopRoundSignature(state, pins.root.workflow, node_id);
       if (Object.keys(signature).length) { attempt.loop_rounds = signature; node.current_loop_rounds = signature; }
       if(definition.fanout?.result_mode==='per_item'){
@@ -689,6 +707,20 @@ export class WorkflowRuntime {
 
   claimHostMain(runId,args){return this.claimNode(runId,args,HOST_MAIN_LIFECYCLE);}
 
+  async reserveWorkerTurn(runId,args,index=0){
+    const record=await this.runs.read(runId),definition=record.pins.root.workflow.nodes.find(node=>node.id===args.node_id);
+    if(definition.executor?.kind==='main'&&!definition.fanout)return this.reserveHostMainTurn(runId,args);
+    const result=await this.transition(runId,'worker_completion_turn',(state,pins)=>{
+      authorize(state,args.control_token);const {node,attempt}=attemptFor(state,args.node_id,args.attempt_id,args.lease_token);
+      requireValue(state.status==='running','RUN_TERMINAL','A stopped Run cannot reserve another worker turn');
+      const limit=pins.root.workflow.nodes.find(node=>node.id===args.node_id).retry.max_attempts;
+      const consumed=currentRoundAttempts(node).reduce((sum,prior)=>sum+(prior.worker_completion_turns?.[index]??0),0);
+      requireValue(consumed<limit,'RETRY_LIMIT','Worker item exhausted its pinned semantic correction budget');
+      (attempt.worker_completion_turns??={})[index]=(attempt.worker_completion_turns[index]??0)+1;
+      return {remaining:limit-consumed-1};
+    });return result.result;
+  }
+
   /** Durably reserve one model response before dispatch so retries cannot reset its budget. */
   async reserveHostMainTurn(runId, { node_id, attempt_id, lease_token, control_token }) {
     const result = await this.transition(runId, 'completion_turn', (state, pins) => {
@@ -704,8 +736,8 @@ export class WorkflowRuntime {
     });
     return result.result;
   }
-  async recordNativeItemResults(runId,{node_id,attempt_id,lease_token,control_token,index,agent_id,turn_id,target_indices,result}){
-    const record=await this.runs.mutate(runId,'native_item_results',(state,pins)=>{
+  async recordNativeItemResults(runId,{node_id,attempt_id,lease_token,control_token,index,agent_id,turn_id,target_indices,result,host_checks={}}){
+    const record=await this.runs.mutate(runId,'native_item_results',async(state,pins)=>{
       authorize(state,control_token);
       const {attempt}=attemptFor(state,node_id,attempt_id,lease_token);
       const definition=pins.root.workflow.nodes.find(item=>item.id===node_id);
@@ -730,53 +762,18 @@ export class WorkflowRuntime {
       const issues=[];
       if(result.items.length>target_indices.length)issues.push({item_index:null,category:'invalid',
         reason:`Native Agent ${agent_id} returned ${result.items.length} entries for ${target_indices.length} Host-selected items`});
-      const schema=definition.outputs_schema.properties[definition.fanout.result_output].items;
       let changed=false;
       for(let localIndex=0;localIndex<Math.min(result.items.length,target_indices.length);localIndex++){
         const item=result.items[localIndex],itemIndex=target_indices[localIndex];
-        if(!item||typeof item!=='object'||Array.isArray(item)){
-          issues.push({item_index:itemIndex,category:'invalid',reason:`Host-selected item ${itemIndex} needs one object result`});continue;
-        }
-        const keys=Object.keys(item);
-        const sharedChangeField=definition.fanout.shared_change_field;
-        const delegated=item.outcome==='delegated'||item.outcome==='blocked'&&Object.hasOwn(item,'result')&&sharedChangeField;
-        if(delegated){
-          const allowedKeys=['outcome','result','block_reason'];
-          const hasValidReason=typeof item.block_reason==='string'&&item.block_reason.trim()&&item.block_reason.length<=4096;
-          if(keys.some(key=>!allowedKeys.includes(key))||!Object.hasOwn(item,'result')||
-            item.outcome==='blocked'&&!hasValidReason||Object.hasOwn(item,'block_reason')&&!hasValidReason){
-            issues.push({item_index:itemIndex,category:'invalid',reason:`Item ${itemIndex} has an invalid delegated shared-change result`});continue;
-          }
-          try{validateData(item.result,schema);}catch(error){if(error.code!=='DATA_INVALID')throw error;
-            issues.push({item_index:itemIndex,category:'invalid',reason:error.message});continue;}
-          const shared=item.result?.[sharedChangeField];
-          const present=typeof shared==='string'?Boolean(shared.trim()):Array.isArray(shared)?shared.length>0:
-            shared&&typeof shared==='object'?Object.keys(shared).length>0:shared!==undefined&&shared!==null&&shared!==false;
-          if(!sharedChangeField||!present){issues.push({item_index:itemIndex,category:'invalid',
-            reason:`Item ${itemIndex} delegated without a nonempty ${sharedChangeField ?? 'shared change'} result`});continue;}
-          const prior=stored[itemIndex];
-          if(prior&&!(prior.agent_id===agent_id&&canonicalJSON(prior.result)===canonicalJSON(item.result))){
-            issues.push({item_index:itemIndex,category:'invalid',reason:`Accepted item ${itemIndex} differs from its journaled result`});continue;
-          }
-          if(!prior){stored[itemIndex]={agent_id,result:structuredClone(item.result),delegated:true,
-            ...(item.block_reason?{delegation_reason:item.block_reason}:{}),...(incremental?{turn_id}:{})};changed=true;}
-          continue;
-        }
-        if(item.outcome==='blocked'&&keys.length===2&&keys.every(key=>['outcome','block_reason'].includes(key))&&typeof item.block_reason==='string'&&item.block_reason.trim()&&item.block_reason.length<=4096){
-          if(!stored[itemIndex])issues.push({item_index:itemIndex,category:'blocked',reason:item.block_reason});
-          continue;
-        }
-        if(item.outcome!=='completed'||keys.length!==2||!keys.every(key=>['outcome','result'].includes(key))){
-          issues.push({item_index:itemIndex,category:'invalid',reason:`Item ${itemIndex} needs completed result or specific blocked reason`});continue;
-        }
-        try{validateData(item.result,schema);}catch(error){if(error.code!=='DATA_INVALID')throw error;
-          issues.push({item_index:itemIndex,category:'invalid',reason:error.message});continue;}
+        const semantic=inspectFanoutItem(definition,item,itemIndex);
+        if(semantic.issue){if(!stored[itemIndex]||semantic.issue.category!=='blocked')issues.push(semantic.issue);continue;}
         const prior=stored[itemIndex];
         if(prior&&!(prior.agent_id===agent_id&&canonicalJSON(prior.result)===canonicalJSON(item.result))){
           issues.push({item_index:itemIndex,category:'invalid',reason:`Accepted item ${itemIndex} differs from its journaled result`});
           continue;
         }
-        if(!prior){stored[itemIndex]={agent_id,result:structuredClone(item.result),...(incremental?{turn_id}: {})};changed=true;}
+        if(!semantic.delegated&&definition.completion_contract?.host_check)await requireHostCompletionProof(this,runId,{state,pins},definition,attempt,item.result,host_checks[itemIndex],itemIndex);
+        if(!prior){stored[itemIndex]={agent_id,result:structuredClone(item.result),...(semantic.delegated?{delegated:true,...(semantic.delegation_reason?{delegation_reason:semantic.delegation_reason}:{})}:{}),...(incremental?{turn_id}: {}),...(host_checks[itemIndex]?{host_check:structuredClone(host_checks[itemIndex])}:{})};changed=true;}
       }
       if(changed){attempt.native_item_results=stored;
         if(incremental)attempt.native_latest_turns={...(attempt.native_latest_turns??{}),[index]:{agent_id,turn_id}};
@@ -811,12 +808,14 @@ export class WorkflowRuntime {
           'HOST_MAIN_RECEIPT_REQUIRED','Main requires its exact context-bound Pi execution receipt; authoring publication requires its independent reviewer receipt');
         if (isolated && !independentAuthoringReview) {
           const receipt=attempt.dispatch.receipt;
+          const sessions=definition.fanout?(receipt.sessions??[{thread_id:receipt.thread_id,session_file:receipt.session_file}]):[{thread_id:receipt.thread_id,session_file:receipt.session_file}];
           requireValue(receipt.context_mode==='isolated' && receipt.main_actor===state.main_actor
-            && receipt.session_id===state.main_actor && receipt.thread_id!==state.main_actor
-            && typeof receipt.thread_id==='string' && typeof receipt.session_file==='string'
+            && receipt.session_id===state.main_actor && sessions.every(session=>session.thread_id!==state.main_actor
+            && typeof session.thread_id==='string' && typeof session.session_file==='string'
+            && payload.evidence.some(item=>item.kind==='pi_session'&&item.thread_id===session.thread_id&&item.observed==='completed'))
             && typeof receipt.observed_model?.provider==='string' && typeof receipt.observed_model?.model_id==='string'
             && typeof receipt.observed_model?.thinking==='string'
-            && payload.evidence.some(item=>item.kind==='pi_session'&&item.thread_id===receipt.thread_id&&item.observed==='completed'),
+            && sessions.length>0,
           'HOST_MAIN_RECEIPT_REQUIRED','Isolated Main completion must identify its actual model, distinct session and completed Pi turn');
         }
         requireValue(attempt.result_proposal?.sha256,'HOST_MAIN_RESULT_REQUIRED','Logical Main completion requires one Host-persisted result proposal');
@@ -830,6 +829,11 @@ export class WorkflowRuntime {
       try { const lifted = hostLiftRequiredWrapper(payload.structured_output, definition.outputs_schema); if (lifted.lifted) payload.structured_output = lifted.value; }
       catch (error) { if (error.code !== 'DATA_INVALID') throw error; }
       validateData(payload.structured_output, definition.outputs_schema);
+      if(definition.completion_contract?.host_check){
+        if(definition.fanout)for(const [index,value]of payload.structured_output[definition.fanout.result_output].entries())
+          await requireHostCompletionProof(this,runId,{state,pins},definition,attempt,value,attempt.native_item_results?.[index]?.host_check,index);
+        else await requireHostCompletionProof(this,runId,{state,pins},definition,attempt,payload.structured_output,payload.evidence.find(item=>item.kind==='pi_host_completion_check')?.reference);
+      }
       validateLoopExitOutput(state, pins.root.workflow, node_id, payload.structured_output);
       for (const [output_name, kind] of Object.entries(definition.output_validators ?? {}))
         if (kind === WORKSPACE_SOURCE_LOCATIONS)
@@ -986,7 +990,7 @@ export class WorkflowRuntime {
       const { node, attempt } = attemptFor(state, node_id, attempt_id, lease_token);
       (this.fenceAttemptExecution ?? ((id, node, attempt) => this.executionAdmission?.fenceAttempt(id, node, attempt)))(runId, node_id, attempt_id);
       onFenced(runId, node_id, attempt_id);
-      node.error = { code: typeof error.code === 'string' ? error.code : 'EXECUTOR_FAILED', message: error.message };
+      node.error = { code: typeof error.code === 'string' ? error.code : 'EXECUTOR_FAILED', message: error.message, ...admissionFailureDetails(error) };
       attempt.status = 'failed'; attempt.finished_at = new Date().toISOString(); attempt.error = node.error;
       setOutcome(state, graphInfo(pins.root.workflow), node_id, 'failed');
       if (state.status === 'failed') interruptActiveNodes(state, 'Another node failed without a recovery edge');
@@ -1009,6 +1013,7 @@ export class WorkflowRuntime {
       requireValue((definition.executor?.kind === 'main' ? semanticTurnsConsumed(node) : currentRoundAttempts(node).length) < definition.retry.max_attempts,
         'RETRY_LIMIT', 'Node exhausted its pinned attempt limit');
       const previous = node.attempts.at(-1);
+      requireValue(Object.values(previous?.completion_checks??{}).every(slot=>slot.receipt),'HOST_CHECK_RECONCILIATION_REQUIRED','Automatic completion effects require exact durable receipts before a new attempt can run');
       if (previous?.child_run_id) {
         const child = await this.runs.read(previous.child_run_id);
         requireValue(TERMINAL.has(child.state.status), 'CHILD_RECONCILIATION_REQUIRED', 'The previous child Run must be terminal before a new attempt can start');

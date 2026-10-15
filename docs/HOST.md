@@ -1,8 +1,18 @@
 # Pi Host 接口
 
+Host 负责确定性自动化、路由和输入投影，节点只读取当前职责需要的材料。普通读取不等于完整审计：和 CAW 一样，整包资源校验属于显式 `audit()`，实际资源消费者验证其选中 bytes；授权/状态读取不扫描无关对象。
+
+日常授权、父 Run 检查、进度记录/轮询和 detached owner 只检查当前 controller、actor、lease 与日志新增尾部；无变化时不读正文，不重复读取所有资源。显式诊断/恢复仍完整验证日志和 pins。热路径信任 Host 自己维护的 append-only journal，以文件身份及纳秒时间戳发现替换/缩短/原地修改并重建严格快照；新尾部仍验证完整事件哈希链。缓存有界、事件只读、返回状态与 pins 独立复制。租约和取消仍检查最新事件，不延长准入超时，不重放事务 callback。准入异常保留有限的阶段、路径、PID 和耗时，跨 RPC、聚合和历史压缩也不丢失；不保存 owner token。
+
+Automatic completion freshness 仅核验图中明确声明的 product files，不能因 `allowed_paths` 或读取权限而冻结整个目录。没有 required products 时不额外保存目录快照；准确工具回执、租约、成功字段和 schema 仍验证。历史整目录快照仅投影已保存的声明产物，不重新扫描其他文件，也不改写历史。
+
+Host 工具的显式 `deadline_ms` 范围为 1ms 至一小时。固定时限经可信 executor context 传入资源程序 broker，并在 runtime 重新核验后保留；普通模型任务程序的默认值不变，模型参数不提供时限扩展。执行出错后的确认停机回执保存至准确 intent/check slot；无法确认停止时保留所有权和原始错误。
+
 `PiCawService` 接收注入的 Host；图引擎不加载另一份 Pi SDK。扩展通过 Pi 自己解析的 peer imports 使用 SDK 1.0 接口。实际版本由 `runtimeMetadata()` 读取，无法观察时显示 unknown/null，不能用版本常量替代观察。
 
 ## 会话、模型与工具
+
+Run workspace 与发起聊天的 cwd 是独立字段，不能因图中含有 orchestration Main（包括未选分支）而要求两者相同。当前聊天 Main 的 packet/prompt 明确交付 Run workspace；write/edit、broker、helper grant 与现有审计仍以该授权目录为准，Host 不改变用户聊天 cwd。显式 `main_modes` worker 覆盖也适用于源声明的 `current_main` 验收节点：源默认、只读验收、accepted 门槛、反馈和轮次策略保留；回执分别记录逻辑 Main actor 和实际 worker thread。普通独立审阅循环不能覆盖成 orchestration。
 
 | 接口 | 契约 |
 | --- | --- |

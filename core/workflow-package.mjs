@@ -2,10 +2,12 @@ import { canonicalJSON, digest, prepareResources, revisionHash } from './workflo
 import { requireValue } from './workflow-paths.mjs';
 import { requireWorkflowSnapshotIntegrity } from './workflow-ready-validation.mjs';
 import { normalizeExecutableRequirements } from './runtime-requirements.mjs';
+import { emptyWorkflowBindings } from './workflow-provider-bindings.mjs';
 
 export const WORKFLOW_PACKAGE_FORMAT='pi-caw.workflow.package';
 export const WORKFLOW_PACKAGE_VERSION=1;
 export const WORKFLOW_PACKAGE_API=1;
+const PACKAGE_PLUGINS = new Map([['pi-caw.workflow.package', 'pi-CAW'], ['codex.workflow.package', 'codex-agents-workflow']]);
 
 function payloadOf(pack,resources,packageVersion){
   requireValue(/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(packageVersion),'WORKFLOW_PACKAGE_SEMVER','Workflow package version must be semantic');
@@ -28,8 +30,8 @@ export function exportWorkflowPackage(pack,resources,{packageVersion='1.0.0'}={}
 export function validateWorkflowPackage(bundle){
   requireValue(bundle && typeof bundle==='object' && !Array.isArray(bundle),'WORKFLOW_PACKAGE','Workflow package must be an object');
   const {package_sha256,...payload}=bundle;
-  requireValue(payload.format===WORKFLOW_PACKAGE_FORMAT && payload.format_version===WORKFLOW_PACKAGE_VERSION,'WORKFLOW_PACKAGE_VERSION','Unsupported Workflow package format');
-  requireValue(payload.compatibility?.plugin==='pi-CAW' && payload.compatibility.package_api===WORKFLOW_PACKAGE_API && payload.compatibility.workflow_schema===1,'WORKFLOW_PACKAGE_COMPATIBILITY','Workflow package is incompatible with this plugin');
+  requireValue(PACKAGE_PLUGINS.has(payload.format) && payload.format_version===WORKFLOW_PACKAGE_VERSION,'WORKFLOW_PACKAGE_VERSION','Unsupported Workflow package format');
+  requireValue(payload.compatibility?.plugin===PACKAGE_PLUGINS.get(payload.format) && payload.compatibility.package_api===WORKFLOW_PACKAGE_API && payload.compatibility.workflow_schema===1,'WORKFLOW_PACKAGE_COMPATIBILITY','Workflow package is incompatible with this plugin');
   requireValue(/^[a-f0-9]{64}$/.test(package_sha256) && digest(canonicalJSON(payload))===package_sha256,'WORKFLOW_PACKAGE_INTEGRITY','Workflow package digest differs');
   requireValue(payload.package?.id===payload.snapshot?.workflow?.id && /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(payload.package?.version ?? ''),'WORKFLOW_PACKAGE_IDENTITY','Workflow package identity is invalid');
   const resources=Object.create(null);
@@ -49,11 +51,13 @@ export function validateWorkflowPackage(bundle){
     'WORKFLOW_PACKAGE_DEPENDENCIES','Workflow package dependency manifest differs from its Workflow');
   requireValue(revisionHash(snapshot)===payload.snapshot.revision_hash,'WORKFLOW_PACKAGE_REVISION','Workflow package revision identity differs');
   requireWorkflowSnapshotIntegrity(snapshot);
-  return {package:structuredClone(payload.package),snapshot:structuredClone(payload.snapshot),resources,package_sha256};
+  return {package:structuredClone(payload.package),snapshot:structuredClone(payload.snapshot),resources,package_sha256,format:payload.format};
 }
 
-export async function installWorkflowPackage(store,bundle,{source=null}={}){
+export const validatePortableWorkflowPackage = validateWorkflowPackage;
+
+export async function installWorkflowPackage(store,bundle,{source=null,expected_revision}={}){
   const checked=validateWorkflowPackage(bundle);
-  return store.install(checked.snapshot,{resources:checked.resources,installation:{source,package_version:checked.package.version,
+  return store.install(checked.snapshot,{expected_revision,resources:checked.resources,sourcePackage:bundle,localBindings:emptyWorkflowBindings(checked.snapshot),installation:{source,package_version:checked.package.version,
     package_sha256:checked.package_sha256,installed_at:new Date().toISOString()}});
 }

@@ -1,5 +1,77 @@
 # 独立迁移记录
 
+## 0.5.10：逐项语义修复与原版程序接口
+
+真实三页 Run 的渲染器收到 `--mode page_batch`，三个 worker 因而报告阻塞。Pi 的逐项适配器却把具体原因替换为 `PI_HOST_CHECK_ITEM`，没有使用 core 已有的拒收及同 worker 修复机制。现在 submission 使用无副作用的逐项语义验证；已结束 turn 的 blocked/invalid 保留原 session、turn 和具体原因，在固定预算内只修复未通过条目。已通过的兄弟项及 Host 成功效果不重放。大结果可通过现有 stage 对数组内部字段做小补丁。机械执行失败仍明确终止，不消耗语义修复预算。
+
+原工作流声明的 `run_workspace_program`/`continue_workspace_command` 现由 Pi 自己的程序 broker 提供：准确 stdin、字面 argv、已发现 executable、后台续读和原进程所有权。文件变化在程序启动及确认结束时观察，续读不重复扫描工作区。非零退出码保留；超时、未确认停机及范围错误不被隐藏。既有 blocking 程序接口保持可用。
+
+自动 Host 检查独立选择其固定程序及 argv 引用的资源。worker 的阅读材料不再被误用为 Host 可执行资源清单；不为补齐检查器而给模型加载源码或扫描整包。
+
+同步 CAW 的分支投影语义：skipped 节点的日志占位 null 不再作为已产生结果抢先命中 coalesce；实际执行节点显式返回的 null 仍然是有效数据。三页路径因此能把真实验收结果传给最终交付节点。
+
+工作流路由 mode 与渲染器配色 mode 同名的问题在该工作流资源的新修订中修正；Host 不增加 answer 专用判断，历史 Run 固定资源保持不变。导入 Ready、离线 SDK 协议测试、真实原版渲染器及实机完整 Run 是独立验证层次。
+
+## 0.5.7：资源工具实现分发
+
+真实 answer Run 在 `am_declared_page_route` 失败，原因是服务只按工具 ID 判断内置归属，而底层执行器同时支持按实现名解析。该工具 ID 对应工作流固定资源，由内置 `workflow-resource-program` 执行，却被上层误送到缺失的外部注册项。父服务及 worker 服务的隔离测试均复现同一错误。
+
+工具分发与自动完成检查现在共用底层的 ID 优先、实现名次之的查找规则，并按实际注册对象判定内置/外部归属。执行持有同一次选择的 registry；真正外部工具继续要求准确身份、授权、取消和效果证据。日志记录 Run/node/tool/implementation/source，缺失注册错误包含确切工具和实现名。无需改写 answer Workflow、用户模型或旧 Run pins，也不自动重放历史失败。
+
+## 0.5.6：Workbench 版本与项目入口
+
+吸收已安装 CAW 1.2.2 的 Workbench 版本、更新提示和 GitHub Star 展示，改用 pi-CAW 自己的仓库。当前版本由 package.json 注入构建；更新元数据仅通过已认证的 Workbench 请求读取，短时缓存与并发请求合并，不加入 Agent 工具、Run 启动或维护路径。无法联网时保留当前版本及 Star 入口并显示检查失败，不把失败当作已是最新。此功能不自动安装、发布或改变用户工作流及模型配置。
+
+## 0.5.5：初始化所有权与关闭
+
+0.5.4 的只读准入修复保留。实机安全停机进一步暴露旧扩展的初始化生命周期缺陷：服务只在 `initialize()` 完成后赋给扩展变量，并发请求会创建多个实例；初始化失败或尚未完成时，关闭入口可能看不到已创建的后台实例。服务初始化在最终进度读取之前已经创建 timer；原只读准入错误可以使这一步失败。真实扩展入口的隔离回归复现并发、失败及初始化中关闭后的后台所有权遗漏，旧 Host 日志也记录了 session_start 的准入超时；没有旧 service instance ID，不能宣称重建了每个实机 timer 的唯一来源。
+
+扩展现在保留单一初始化 promise 与确切待初始化 owner，失败时先等待这个 owner 关闭，关闭入口也等待在途初始化。不能因 SDK 捕获回调错误而把未确认清理当成可重新初始化；清理失败明确暴露。模型、原始聊天身份和 Run 固定包不因此替换。安全升级还须实际检查父服务和纯文件维护 worker 的所有权，不能用一个空闲聊天表替代关闭证据。
+
+打开 Workbench 的 promise 也有准确所有权：并发命令共用一次打开，退出等待打开中的 server 并关闭，不能在退出后继续发布通知。工具及私有 Host 命令在初始化或人工确认的 await 边界之后重新检查停止状态。生命周期日志记录 trace ID、PID、session ID、phase 与安全错误 code，不记录提示词、模型凭证或锁 token；原始错误仍向调用者失败，包含 undefined 等原始抛出值的清理失败也不能遗漏。
+
+## 0.5.4：只读诊断与准入恢复
+
+实机升级后，已结束的 Run 留下失效进程的准入票据和写锁。旧 `runs`、状态卡片和 `inspect_run` 都通过写准入读取；一个孤儿票据不仅阻止写入，也阻止诊断。旧恢复在解除准入前读取控制权，且只恢复写锁，未覆盖排队票据，形成恢复入口受自身前置条件阻塞的问题。
+
+只读观察现在直接校验实际 journal 和不可变 pins，不分配或清理所有权记录。执行与变更仍需独占准入；日志尾部未提交、hash chain 损坏、pins 不匹配照常报错。准入检查绑定当前 actor/controller，不额外要求人工确认；退休记录才需要 human 授权，并核对准确观察的字节、物理身份和 owner 确实已退出。活跃、无法确认、变化或损坏的记录保持可见。恢复准入不会恢复业务执行、启动 driver 或重复效果。自动留存对待恢复准入记录返回保护原因。
+
+写锁退休复用既有 recovery 互斥，避免两个恢复请求移走随后创建的活跃写锁；随机 UUID 票据逐项退休。批量失败携带已退休记录的保留证据。空退休容器只显示诊断，实际保留记录受保护。未完成留存且原 journal/pins 仍完整时，可用于准入维护；已清理结果不能代替原控制权证据。既有无 owner 记录的 `.recovery.lock` 会返回 `recovery_pending`，本入口不推断它已废弃、不自动清除，也不声称所有历史恢复标记均可回收。
+
+停机检查须覆盖服务事务和准入记录，不能把“无正在生成的聊天”和“任务进程已退出”当成全部存储操作已清理。此次磁盘证据证明记录在停机后仍存在；仅有摘要的历史快照不足以证明原持锁 PID 或具体操作，也不把清理记录当成业务 Run 已恢复。
+
+## 0.5.3：移除额外的整个工作区冻结
+
+对照 CAW 当前工作源码的 worker product-snapshot 修正，发现 Pi 的 automatic Host check 仍额外封存全部获准目录。运行记录、辅助文件或其他产物的正常更新会导致已通过的检查报过期。现在 freshness 只覆盖图中明确声明的 required product files；没有声明产物时仍验证准确 intent、receipt、output/schema、成功字段和租约，不再额外扫描整个目录。原检查工具、渲染/导出、范围和进程所有权核验保持原契约。旧不可变 payload 只投影其已保存的准确产物证明，不改写记录或重复执行；缺失和损坏保持可见。
+
+同步补齐两条 authoring 链路的检查授权指引，并让 review 将额外 workspace/directory freshness/immutability 要求判为 Host 投影缺陷，避免把它送给 planner 消耗修复预算。来源为并行任务中的已观察工作源码，不声称 CAW 新版已发布，也不把尚未更新的 answer 原包当成新修订。Pi 本地工作流提示词和既有模型配置不覆盖。
+
+## 0.5.2：Host 时限、失败回执与语义循环
+
+对照已安装 CAW 1.2 的准确文件摘要，确认 Host 工具执行和 Run admission queue 两处发生变化。Host 合同接受明确的一小时时限，并将固定时限传至实际资源程序执行器；普通任务程序保持既有默认值，模型工具参数不能延长时限。执行异常先确认准确 executor 停机并保存原 intent 对应的回执；停止不确定时保留所有权和诊断。排队文件原子发布使旧 inode 退休时，仅重新读取一次当前路径的 metadata，然后继续验证原有文件、内容、owner 和身份约束。
+
+同时补齐已有 runtime 与两条 authoring 链路的契约差异：明确的 `review_context:current_main` 可通过语义 schema、qualification 和 lowering 保留，只允许只读 orchestration acceptance exit，显式 `max_rounds:null` 不转为有限循环；普通 fresh review 仍有限。未实现的 parallel workspace policy 明确拒绝，不忽略源声明。原工作流封装、修订、资源、模型绑定及历史 Run pins 不因这些程序更新而改写。
+
+新错误回执的实际资源执行器审阅发现，旧 finally 在停机未确认时提前删除活跃记录，会使随后取消核验误报已停止。现在准确 owner 保留到 Host 验证输出后明确 acknowledgment；取消先等待该 adapter 自身清理完成，再核验效果并释放。输出 schema 拒绝仍保留真实写入效果，执行与清理双重失败保留两个原始错误。对应 lifecycle 回归覆盖未确认 owner、迟到清理、输出拒绝及正常释放。
+
+## 0.5.1：维护关闭前的启动核验
+
+实机隔离关闭验收发现，排队中的自动维护会在异步读取完成后向已关闭 manager 申请启动。现在在 admission 前，以及 foreground 与 receipt 读取后再次核验关闭状态，阻止迟到的 listener/claim/worker 分配；没有捕获并吞掉 `HISTORY_CLOSED`。两项确定性回归覆盖读取前与读取期间关闭，既有手动维护及错误保留行为不变。
+
+## 0.5.0：完整执行材料与存储维护
+
+选择性吸收已安装 CAW 1.2 的输入材料、投影后共享输入核验、准确临时目录/锁退休、命令日志分块、有序短事务排队及独立历史维护。来源文件摘要见 `upstream.json`，不声称新的原版 Git commit。大字段保存完整值和 manifest，按 UTF-8 及序列化后的预算决定内联或资源引用；最终提示包含实际 schema 尾部，旧 `max_prompt_chars` 现在按字节限制。命令 stdout/stderr 完整 spool 保留到准确 Run/Role 清理边界。后台 worker 不带模型或凭证；自动维护不接管孤儿 writer，停止不确定时保留 claim。详见 [执行材料与维护](EXECUTION-MATERIALS.md)。不修改原工作流包、模型选择或既有 Run pins，也不声称 Pi 已实现 Codex common-session cache/fork。
+
+## 0.4.1：保留历史的工作流包更新
+
+已安装包的重新导入使用 `expected_revision` 校验当前 head，不删除或重建 Pack。新版原始修订、资源、来源包及本机空模型槽先保存到该修订的独立记录，最后原子替换 head；旧修订、资源和既有 Run pins 保留。未传期望修订仍拒绝重复安装，相同或已保留的来源修订拒绝覆盖已有模型选择。旧根目录记录继续兼容，精确来源包的历史导出保持原封装与摘要。详见 [可移植工作流契约](PORTABLE-WORKFLOWS.md)。
+
+## 0.4.0：CAW 1.2 可移植契约
+
+对照本机已安装 CAW 1.2 的实际源码吸收更新，精确文件哈希记录在 `upstream.json`，不把旧参考 checkout 当成当前版本。直接接收 CAW/Pi package，原始 revision、资源及证书不改写；本机模型绑定单独保存、导入时留空，Run 固定实际绑定。原始 Ready 和本机 launch readiness 分开，未知能力与依赖保持可见。未修改的包可按原封装导出，编辑后输出 Pi 包；未声称旧 CAW 自动接受 Pi 自创包。
+
+两条 authoring 链路更新到 v32：脚本调用接口/依赖守卫、按出现位置分类资源、证据约束 reconciliation、Host-first 修复、精简当前提示词、保留产物只读发现/预览。既有 Pi 精确 schema、coalesce、retained replay、domain hooks 与人工发布均保留。执行层增加节点依赖、自动完成检查、Main worker 逐项工作区/共享输入和显式 current Main 循环。共享输入不表示传输层 cache，分区式目录 fan-out 明确不支持。详见 [可移植工作流契约](PORTABLE-WORKFLOWS.md)。
+
 用户确认并通过本机 Codex CAW 实时清单核验：`implementation-with-review` 已在原环境删除。早期 Pi 迁移误以仓库历史默认清单为用户配置，重新安装了该组合。本次从 Pi 当前定义及两个默认数据入口移除它，保留独立审阅 Role、用户图、模型绑定和历史 Run；新安装与升级不得恢复该过时组合。临时全 Host 的 course-source-compile 验证图亦已撤下，普通源码编译继续直接使用 Host 工具。
 
 Host 交付末端折叠只检查编译器原样生成的可丢弃 final scaffold、单一受保护 Host 前驱、成功边以及其他输出绑定。上游条件分支、join 和显式教师审批不会阻止 Host 直接完成交付；自定义 final 职责继续保留。此前全图线性限制使条件主流程多出一轮 Main，本次修正删除该错误限制，并覆盖带条件和人工 gate 的真实导入/认证发布。已审阅的部署图通过原生编辑器做对应机械修订，记录 direct_editor_publication，不伪造重新 AI 审阅。

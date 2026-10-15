@@ -11,10 +11,17 @@ const MAX_EVENT = 4 * 1024 * 1024;
 const ENVIRONMENT_EVENTS = ['runtime_environment_attention', 'runtime_environment_rebound'];
 export const EVENT_KINDS = new Set(['generation_repair', 'generation_projection', 'generation_review_recheck', 'started', 'claim', 'complete', 'fail', 'retry', 'cancel', 'pause', 'resume', 'approve', 'dispatch_intent', 'dispatch_receipt', 'host_tool_intent', 'host_tool_receipt', 'usage', 'executor_event', 'completion_turn', 'native_agent_rejection', 'native_serial_result', 'native_parallel_result', 'native_item_results', 'managed_native_results', 'recover', 'control_recovery', 'child_intent', 'child_started']);
 for (const kind of ENVIRONMENT_EVENTS) EVENT_KINDS.add(kind);
+for (const kind of ['pi_completion_check_intent','pi_completion_check_receipt','worker_completion_turn']) EVENT_KINDS.add(kind);
 EVENT_KINDS.add('host_tool_collection');
 for (const kind of ['reattach', 'connector_control', 'execution_drain', 'parent_execution_lost', 'host_main_advance_failed', 'host_main_worker_start_failed', 'workspace_input_bound', 'parallel_intent', 'parallel_base', 'parallel_branch', 'parallel_ready', 'parallel_proposal', 'parallel_apply_intent', 'parallel_integrated', 'parallel_error', 'parallel_cleanup']) EVENT_KINDS.add(kind);
 
 export function decodeEvents(bytes, { allowTornTail = false } = {}) {
+  return decodeEventSuffix(bytes, { allowTornTail });
+}
+
+// Only VerifiedJournalReader supplies a previously byte-proven prefix. The same
+// validator handles complete journals and appended events, including global order.
+function decodeEventSuffix(bytes, { allowTornTail = false, sequence = 0, previous = null } = {}) {
   const buffer = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
   requireValue(buffer.length <= MAX_JOURNAL, 'RUN_JOURNAL_LIMIT', 'Run journal exceeds its size limit');
   const completeLength = buffer.length && buffer.at(-1) !== 10 ? buffer.lastIndexOf(10) + 1 : buffer.length;
@@ -25,21 +32,103 @@ export function decodeEvents(bytes, { allowTornTail = false } = {}) {
     requireValue(Buffer.byteLength(line) <= MAX_EVENT, 'RUN_EVENT_LIMIT', 'Run event is oversized');
     return JSON.parse(line);
   }) : [];
-  let previous = null;
   for (const [index, event] of events.entries()) {
     const { hash, ...content } = event;
-    requireValue(content.sequence === index + 1 && content.previous === previous && digest(canonicalJSON(content)) === hash, 'RUN_JOURNAL_CORRUPT', 'Run journal hash chain is invalid');
-    requireValue(EVENT_KINDS.has(content.kind) && (index === 0 ? content.kind === 'started' : content.kind !== 'started'), 'RUN_EVENT_KIND', 'Unexpected Run event kind/order');
+    requireValue(content.sequence === sequence + index + 1 && content.previous === previous && digest(canonicalJSON(content)) === hash, 'RUN_JOURNAL_CORRUPT', 'Run journal hash chain is invalid');
+    requireValue(EVENT_KINDS.has(content.kind) && (sequence + index === 0 ? content.kind === 'started' : content.kind !== 'started'), 'RUN_EVENT_KIND', 'Unexpected Run event kind/order');
     previous = hash;
   }
   return { events, tail, completeLength };
 }
 
-export async function readEvents(path, options) {
+async function readJournalBytes(path) {
   await noSymlinks(path);
   const info = await lstat(path);
   requireValue(info.isFile() && info.size <= MAX_JOURNAL, 'RUN_JOURNAL_LIMIT', 'Run journal must be a bounded regular file');
-  return decodeEvents(await readFile(path), options);
+  const bytes = await readFile(path);
+  requireValue(bytes.length <= MAX_JOURNAL, 'RUN_JOURNAL_LIMIT', 'Run journal grew beyond its size limit');
+  return bytes;
+}
+
+export async function readEvents(path, options) {
+  return decodeEvents(await readJournalBytes(path), options);
+}
+
+function freezeEvent(value) {
+  if (!value || typeof value !== 'object' || Object.isFrozen(value)) return;
+  for (const child of Object.values(value)) freezeEvent(child);
+  Object.freeze(value);
+}
+
+// Strict reads prove the complete prefix against actual bytes. Incremental reads
+// are for Host-owned append-only authority/progress paths: inspect identity and
+// read only the new tail. Explicit inspection/recovery uses strict reads. Neither
+// lane accepts mutable caller objects or unvalidated appended events.
+export class VerifiedJournalReader {
+  #entries = new Map();
+  #bytes = 0;
+  constructor({ maxBytes = MAX_JOURNAL, maxEntries = 16 } = {}) {
+    requireValue(Number.isInteger(maxBytes) && maxBytes > 0 && maxBytes <= MAX_JOURNAL
+      && Number.isInteger(maxEntries) && maxEntries > 0 && maxEntries <= 16,
+    'RUN_JOURNAL_CACHE_LIMIT', 'Verified journal reuse requires bounded byte and entry budgets');
+    this.maxBytes = maxBytes; this.maxEntries = maxEntries;
+  }
+  async read(path, { incremental = false } = {}) {
+    const prior = this.#entries.get(path);
+    let bytes, identity, reuse = false, completeLength;
+    if (incremental) {
+      // This lane belongs to an already-owned append-only Host journal writer.
+      // It reads only new events, not a forensic rescan of prior history.
+      await noSymlinks(path);
+      const file = await open(path, 'r');
+      try {
+        const info = await file.stat({ bigint: true });
+        requireValue(info.isFile() && info.size <= BigInt(MAX_JOURNAL), 'RUN_JOURNAL_LIMIT', 'Run journal must be a bounded regular file');
+        identity = { dev: info.dev, ino: info.ino, mtime: info.mtimeNs, ctime: info.ctimeNs };
+        completeLength = Number(info.size);
+        reuse = prior && prior.identity?.dev === info.dev && prior.identity.ino === info.ino
+          && completeLength >= prior.size && (completeLength > prior.size
+            || prior.identity.mtime === info.mtimeNs && prior.identity.ctime === info.ctimeNs);
+        const offset = reuse ? prior.size : 0, length = completeLength - offset;
+        bytes = Buffer.allocUnsafe(length);
+        let received = 0;
+        while (received < length) {
+          const result = await file.read(bytes, received, length - received, offset + received);
+          requireValue(result.bytesRead > 0, 'RUN_JOURNAL_CHANGED', 'Run journal changed during its owned read');
+          received += result.bytesRead;
+        }
+        // The captured size is this read's snapshot boundary. A concurrent Host
+        // append belongs to the next read; captured torn bytes still fail decode.
+      } finally { await file.close(); }
+    } else {
+      bytes = await readJournalBytes(path); completeLength = bytes.length;
+      let offset = 0;
+      reuse = prior && bytes.length >= prior.size && prior.chunks.every(chunk => {
+        const same = bytes.subarray(offset, offset + chunk.length).equals(chunk); offset += chunk.length; return same;
+      });
+      if (reuse) bytes = bytes.subarray(prior.size);
+      if (reuse && completeLength === prior.size) identity = prior.identity;
+    }
+    // A strict suffix decode still rejects a torn tail even on a prefix hit.
+    const decoded = decodeEventSuffix(bytes,
+      reuse ? { sequence: prior.events.length, previous: prior.events.at(-1)?.hash ?? null } : {});
+    for (const event of decoded.events) freezeEvent(event);
+    const events = reuse && decoded.events.length === 0 ? prior.events
+      : Object.freeze([...(reuse ? prior.events : []), ...decoded.events]);
+    const old = this.#entries.get(path);
+    if (old) { this.#entries.delete(path); this.#bytes -= old.size; }
+    if (completeLength <= this.maxBytes) {
+      // Copy a strict suffix out of its full-file backing buffer. Retain only
+      // the new bytes, never an extra full history for each tiny append.
+      const chunks = reuse ? [...prior.chunks, ...(bytes.length ? [Buffer.from(bytes)] : [])] : [bytes];
+      this.#entries.set(path, { chunks, size: completeLength, identity, events }); this.#bytes += completeLength;
+      while (this.#bytes > this.maxBytes || this.#entries.size > this.maxEntries) {
+        const [key, entry] = this.#entries.entries().next().value;
+        this.#entries.delete(key); this.#bytes -= entry.size;
+      }
+    }
+    return { events, reused_prefix_bytes: reuse ? prior.size : 0, bytes_read: incremental ? bytes.length : completeLength, completeLength };
+  }
 }
 
 export async function appendEvent(path, events, kind, payload) {

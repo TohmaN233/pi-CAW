@@ -1,11 +1,62 @@
 import { open, readFile, lstat, readdir, mkdir, rename, unlink, rm, rmdir } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
+import { queuedRunAdmission } from './run-admission-queue.mjs';
+import { retireOwnedFile, retirementErrorDetails } from './owned-file-retirement.mjs';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { dirname, join, resolve, isAbsolute } from 'node:path';
-import { ensureDirectory, noSymlinks, packDirectory, insideRoot, requireValue, workflowId } from './workflow-paths.mjs';
+import { ensureDirectory, noSymlinks, canonicalNoLinks, packDirectory, insideRoot, requireValue, workflowId } from './workflow-paths.mjs';
 import { canonicalJSON, digest, LIMITS, prepareResources, revisionHash, validateManifest } from './workflow-revisions.mjs';
 import { validateWorkflowShape } from './workflow-schema.mjs';
 import { validateWorkflowGraph } from './workflow-validator.mjs';
 import { requireWorkflowSnapshotIntegrity } from './workflow-ready-validation.mjs';
+import { validateWorkflowPackage } from './workflow-package.mjs';
+import { emptyWorkflowBindings } from './workflow-provider-bindings.mjs';
+
+// Uncached extension modules share a same-process queue. The on-disk owner lock
+// remains authoritative for other processes and interrupted transactions.
+const writerStateKey = Symbol.for('pi-caw.workflow-store.writers.v1');
+const writerState = globalThis[writerStateKey] ??= { tails: new Map(), ownership: new AsyncLocalStorage() };
+
+async function serializeStore(root, action, deadline, onWait) {
+  const canonicalRoot = await canonicalNoLinks(root);
+  const key = process.platform === 'win32' ? canonicalRoot.toLowerCase() : canonicalRoot;
+  const ancestors = writerState.ownership.getStore() ?? [];
+  requireValue(!ancestors.some(owner => owner.key === key && owner.active), 'WORKFLOW_STORE_BUSY',
+    'A Workflow writer cannot recursively acquire its own store lock');
+  requireValue(!ancestors.some(owner => owner.active) || !writerState.tails.has(key), 'WORKFLOW_STORE_BUSY',
+    'A Workflow writer cannot wait for another busy store while holding a store lock');
+  const owner = { key, active: false };
+  const queuedAt = writerState.tails.has(key) ? performance.now() : null;
+  const timeout = () => Object.assign(new Error('Run admission timed out waiting for its same-process predecessor'),
+    { code: 'RUN_STORE_ADMISSION_TIMEOUT', phase: 'process_wait', lock_path: join(root, '.writer.lock'),
+      owner_pid: process.pid, waited_ms: Math.max(0, Math.floor(performance.now() - (queuedAt ?? performance.now()))) });
+  if (queuedAt !== null && onWait) await onWait({ phase: 'process_queued', lock_path: join(root, '.writer.lock'), owner_pid: process.pid });
+  let timer;
+  const operation = (writerState.tails.get(key) ?? Promise.resolve()).then(() => {
+    if (deadline !== undefined && performance.now() >= deadline) throw timeout();
+    clearTimeout(timer); // The admission deadline ends before the callback.
+    owner.active = true;
+    return writerState.ownership.run([...ancestors, owner], async () => {
+      try {
+        if (queuedAt !== null && onWait) await onWait({ phase: 'process_acquired', lock_path: join(root, '.writer.lock'),
+          owner_pid: process.pid, waited_ms: Math.floor(performance.now() - queuedAt) });
+        return await action();
+      }
+      finally { owner.active = false; }
+    });
+  });
+  // Only the queue tail settles errors; the caller receives the original rejection.
+  const settled = operation.then(() => undefined, () => undefined);
+  writerState.tails.set(key, settled);
+  void settled.then(() => { if (writerState.tails.get(key) === settled) writerState.tails.delete(key); });
+  if (deadline === undefined) return operation;
+  try {
+    return await Promise.race([operation, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(timeout()), Math.max(1, deadline - performance.now()));
+    })]);
+  } finally { clearTimeout(timer); }
+}
 
 export async function syncDirectory(path) {
   // Windows does not provide portable directory fsync through Node. File fsync and
@@ -30,6 +81,148 @@ async function readBounded(path, max) {
   return data;
 }
 
+const admissionTraceState = globalThis[Symbol.for('pi-caw.run-admission.trace.v1')] ??= new Map();
+const coalescibleAdmissionPhases = new Set(['process_queued', 'process_acquired', 'queued', 'waiting']);
+// Repeated polling reads can queue behind the same tiny transaction. Preserve
+// first contention, owner/phase changes, slow acquisition and all error events;
+// coalesce repeated default transport messages for one root/owner/phase.
+export const admissionTrace = diagnostic => {
+  if (!coalescibleAdmissionPhases.has(diagnostic.phase)) {
+    console.error('[workflow-run-admission] ' + canonicalJSON(diagnostic)); return;
+  }
+  const root = diagnostic.lock_path ?? (diagnostic.ticket_path ? dirname(diagnostic.ticket_path) : 'unknown');
+  const key = `${observerKey(root)}|${diagnostic.phase}|${diagnostic.owner_pid ?? ''}|${diagnostic.owner_operation ?? ''}`;
+  const now = performance.now(), previous = admissionTraceState.get(key);
+  if (previous && now - previous.at < 1000 && !(diagnostic.phase === 'process_acquired' && diagnostic.waited_ms >= 100)) {
+    previous.suppressed++; return;
+  }
+  console.error('[workflow-run-admission] ' + canonicalJSON({ ...diagnostic,
+    ...(previous?.suppressed ? { coalesced_events: previous.suppressed } : {}) }));
+  admissionTraceState.delete(key); admissionTraceState.set(key, { at: now, suppressed: 0 });
+  if (admissionTraceState.size > 128) admissionTraceState.delete(admissionTraceState.keys().next().value);
+};
+const admissionObservers=new AsyncLocalStorage();
+const observerKey=root=>process.platform==='win32'?resolve(root).toLowerCase():resolve(root);
+function admissionObserver(root){
+ const scoped=admissionObservers.getStore();
+ return scoped?.active&&scoped.root===observerKey(root)?scoped.onWait:admissionTrace;
+}
+// Host diagnostic transport can observe one admission root without replacing
+// default logging elsewhere or explicit per-call onWait callbacks. Await the
+// original sync/async observer contract; callback failures remain failures.
+export async function withRunAdmissionObserver({admissionRoot,onWait},action){
+ requireValue(isAbsolute(admissionRoot)&&typeof onWait==='function'&&typeof action==='function',
+  'RUN_STORE_ADMISSION_OBSERVER','Admission observer requires exact root and callable boundaries');
+ const scoped={root:observerKey(admissionRoot),onWait,active:true};
+ try{return await admissionObservers.run(scoped,action);}finally{scoped.active=false;}
+}
+const pauseAdmission = () => new Promise(resolveWait => setTimeout(resolveWait,25));
+const busyWriter = (path,message) => Object.assign(new Error(`${message}: ${path}`),{code:'WORKFLOW_STORE_BUSY',lock_path:path});
+const exactAdmissionPath=(path,expected)=>typeof path==='string'&&(process.platform==='win32'
+  ?resolve(path).toLowerCase()===resolve(expected).toLowerCase():resolve(path)===resolve(expected));
+
+async function writerOpenObservation(lock){
+  // Evidence only: do not retry an unexplained permission/sharing error or
+  // alter the denied file. No owner token or unverified file body is emitted.
+  let info;
+  try{info=await lstat(lock);}
+  catch(error){return error?.code==='ENOENT'?{lock_exists:false}:{lock_exists:null,inspection_error_code:error?.code??'UNKNOWN'};}
+  const result={lock_exists:true,lock_kind:info.isSymbolicLink()?'symlink':info.isFile()?'file':info.isDirectory()?'directory':'other',lock_bytes:info.size};
+  if(!info.isFile()||info.nlink!==1||info.size>4096)return result;
+  try{
+    const owner=JSON.parse((await readBounded(lock,4096)).toString('utf8'));
+    result.owner_record_valid=owner&&typeof owner==='object'&&!Array.isArray(owner)&&Number.isSafeInteger(owner.pid)&&owner.pid>0
+      &&typeof owner.created_at==='string'&&Number.isFinite(Date.parse(owner.created_at))
+      &&typeof owner.token==='string'&&/^[a-f0-9-]{36}$/.test(owner.token)
+      &&Object.keys(owner).every(key=>['pid','token','created_at','operation'].includes(key))
+      &&(!Object.hasOwn(owner,'operation')||typeof owner.operation==='string'&&/^[a-z_]{1,32}$/.test(owner.operation));
+    if(result.owner_record_valid){
+      result.observed_owner_pid=owner.pid;
+      if(owner.operation)result.observed_owner_operation=owner.operation;
+      try{process.kill(owner.pid,0);result.observed_owner_alive=true;}
+      catch(error){result.observed_owner_alive=error?.code==='ESRCH'?false:null;if(error?.code!=='ESRCH')result.owner_probe_error_code=error?.code??'UNKNOWN';}
+    }
+  }catch(error){result.inspection_error_code=error?.code??(error instanceof SyntaxError?'INVALID_OWNER_JSON':'UNKNOWN');}
+  return result;
+}
+
+async function acquireWriter(root, admission) {
+  const lock=join(root,'.writer.lock'),recovery=join(root,'.recovery.lock'),started=performance.now();
+  let observed=null,initialized=null,waited=false;
+  const diagnostic = phase => ({phase,lock_path:lock,owner_pid:observed?.pid??null,
+    created_at:observed?.created_at??initialized?.created_at??null,waited_ms:Math.floor(performance.now()-started),
+    ...(observed?.operation?{owner_operation:observed.operation}:{})});
+  const reject = (code,message,cause) => Object.assign(new Error(`${message}: ${lock}`),{code,...diagnostic('failed'),...(cause?{cause}: {})});
+  for (;;) {
+    if(admission&&waited&&performance.now()-started>=admission.timeoutMs)throw reject('RUN_STORE_ADMISSION_TIMEOUT','Run admission timed out waiting for its active owner');
+    try {
+      await lstat(recovery);
+      if(admission)throw Object.assign(reject('RUN_STORE_ADMISSION_RECOVERY_REQUIRED','Run admission recovery is in progress or requires inspection'),{lock_path:recovery});
+      throw busyWriter(recovery,'Writer recovery is in progress or requires inspection');
+    } catch(error){if(error?.code!=='ENOENT')throw error;}
+    try {return {handle:await open(lock,'wx',0o600),trace:waited?diagnostic('acquired'):null};}
+    catch(error){
+      if(error?.code!=='EEXIST'){
+        if(!admission)throw error;
+        const observation=await writerOpenObservation(lock);
+        const detail={...diagnostic('open_failed'),...observation,open_error_code:error?.code??'UNKNOWN',open_syscall:error.syscall??'open',
+          ...(Number.isSafeInteger(error.errno)?{open_errno:error.errno}:{})};
+        const failure=Object.assign(reject('RUN_STORE_ADMISSION_OPEN_FAILED','Run admission exclusive writer could not be opened',error),detail,
+          {details:{admission:{...detail,observation_basis:'after_failed_open',wait_basis:'exclusive_writer_acquisition'}}});
+        try{await admission.onWait(detail);}
+        catch(traceError){throw new AggregateError([failure,traceError],'Run writer opening and its failure diagnostic both failed');}
+        throw failure;
+      }
+      if(!admission)throw busyWriter(lock,'Workflow store has a writer or interrupted transaction; inspect the lock before recovery');
+    }
+    let info,bytes;
+    try {await noSymlinks(lock);info=await lstat(lock);bytes=await readBounded(lock,4096);}
+    catch(error){
+      if(error?.code==='ENOENT'&&exactAdmissionPath(error.path,lock))continue; // Exact owner released while being inspected.
+      throw reject('RUN_STORE_ADMISSION_READ_FAILED','Run admission owner cannot be read safely',error);
+    }
+    if(!bytes.length){
+      // wx publication precedes the tiny owner write. Only a recent EMPTY file
+      // receives this bounded initialization grace; invalid nonempty JSON and
+      // permission errors never share this path and never become retry success.
+      const created=info.birthtimeMs>0?info.birthtimeMs:info.ctimeMs;
+      if(!initialized||initialized.dev!==info.dev||initialized.ino!==info.ino)initialized={dev:info.dev,ino:info.ino,started:performance.now(),created_at:new Date(created).toISOString()};
+      if(Date.now()-created>admission.initializationMs||performance.now()-initialized.started>=admission.initializationMs)
+        throw reject('RUN_STORE_ADMISSION_INITIALIZATION_TIMEOUT','Run admission owner initialization did not complete');
+    }else{
+      let owner;
+      try {owner=JSON.parse(bytes.toString('utf8'));}
+      catch{throw reject('RUN_STORE_ADMISSION_MALFORMED','Run admission owner JSON is malformed');}
+      requireValue(owner&&typeof owner==='object'&&!Array.isArray(owner)&&Object.keys(owner).every(key=>['pid','token','created_at','operation'].includes(key))
+        &&Number.isSafeInteger(owner.pid)&&owner.pid>0&&typeof owner.token==='string'&&/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(owner.token)
+        &&typeof owner.created_at==='string'&&owner.created_at.length<=64&&Number.isFinite(Date.parse(owner.created_at))
+        &&(!Object.hasOwn(owner,'operation')||typeof owner.operation==='string'&&/^[a-z_]{1,32}$/.test(owner.operation)),
+      'RUN_STORE_ADMISSION_MALFORMED',`Run admission requires an exact bounded PID/creation record: ${lock}`,diagnostic('failed'));
+      const changed=observed?.pid!==owner.pid||observed?.created_at!==owner.created_at;
+      observed={pid:owner.pid,created_at:owner.created_at,...(owner.operation?{operation:owner.operation}:{})};
+      try {process.kill(owner.pid,0);}
+      catch(error){
+        // The inspected owner can release and exit before the PID probe. Prove
+        // the exact bytes still belong to that owner before diagnosing an
+        // orphan; a changed/released lock only returns to acquisition.
+        let current;
+        try {current=await readBounded(lock,4096);}
+        catch(readError){
+          if(readError?.code==='ENOENT'&&exactAdmissionPath(readError.path,lock))continue;
+          throw reject('RUN_STORE_ADMISSION_READ_FAILED','Run admission owner cannot be rechecked safely',readError);
+        }
+        if(!current.equals(bytes))continue;
+        if(error?.code==='ESRCH')throw reject('RUN_STORE_ADMISSION_ORPHANED','Run admission owner is dead; inspectWriter/recoverWriter requires explicit maintenance');
+        throw reject('RUN_STORE_ADMISSION_OWNER_UNVERIFIED','Run admission owner liveness could not be verified',error);
+      }
+      if(!waited||changed)await admission.onWait(diagnostic('waiting'));
+    }
+    waited=true;
+    if(performance.now()-started>=admission.timeoutMs)throw reject('RUN_STORE_ADMISSION_TIMEOUT','Run admission timed out waiting for its active owner');
+    await pauseAdmission();
+  }
+}
+
 async function purgePackHistory(pack, keepRevision, keepObjects) {
   const revisions = join(pack, 'revisions'); const objects = join(pack, 'objects');
   for (const entry of await readdir(revisions, { withFileTypes: true })) {
@@ -47,12 +240,12 @@ async function replaceJSON(path,value){
   const temporary=path+'.tmp-'+randomUUID();
   await writeExclusive(temporary,canonicalJSON(value));
   try{await rename(temporary,path);await syncDirectory(dirname(path));}
-  catch(error){try{await unlink(temporary);}catch(cleanup){if(cleanup.code!=='ENOENT')throw new AggregateError([error,cleanup],'Durable record update and cleanup failed');}throw error;}
+  catch(error){try{await unlink(temporary);}catch(cleanup){if(cleanup?.code!=='ENOENT')throw new AggregateError([error,cleanup],'Durable record update and cleanup failed');}throw error;}
 }
 
 async function optionalJSON(path,max=1024*1024){
   try{return JSON.parse(await readBounded(path,max));}
-  catch(error){if(error.code==='ENOENT')return null;throw error;}
+  catch(error){if(error?.code==='ENOENT')return null;throw error;}
 }
 
 async function finishHistoryPurge(pack,journal){
@@ -80,62 +273,99 @@ export class WorkflowStore {
   }
 
   async withWriter(action) {
+    return serializeStore(this.root, () => this.#withDiskWriter(action));
+  }
+
+  // Run journal/store callbacks are short filesystem transactions. Callers
+  // hold model/tool effects outside this boundary and never replay callbacks.
+  async withRunAdmission(action, { timeoutMs = 5000, initializationMs = 250, onWait = admissionObserver(this.root), operation } = {}) {
+    requireValue(Number.isInteger(timeoutMs) && timeoutMs > 0 && timeoutMs <= 30000
+      && Number.isInteger(initializationMs) && initializationMs > 0 && initializationMs <= 1000
+      && typeof action === 'function' && typeof onWait === 'function'
+      && (operation === undefined || typeof operation === 'string' && /^[a-z_]{1,32}$/.test(operation)),
+      'RUN_STORE_ADMISSION_OPTIONS', 'Run admission requires bounded deadlines, typed operation and diagnostics');
+    // Preserve the global same-process queue across uncached module copies.
+    // Cross-root nested writers may not wait behind a peer process either.
+    const nested = (writerState.ownership.getStore() ?? []).some(owner => owner.active);
+    const deadline = performance.now() + timeoutMs;
+    return serializeStore(this.root, () => nested ? this.#withDiskWriter(action)
+      : queuedRunAdmission(this.root, { timeoutMs: Math.max(1, Math.floor(deadline - performance.now())), initializationMs, onWait },
+        options => this.#withDiskWriter(action, { ...options, operation })), deadline, onWait);
+  }
+
+  async #withDiskWriter(action, admission = null) {
     await noSymlinks(this.root);
-    try {
-      await lstat(join(this.root, '.recovery.lock'));
-      throw Object.assign(new Error('Writer recovery is in progress or requires inspection'), { code: 'WORKFLOW_STORE_BUSY' });
-    } catch (error) { if (error.code !== 'ENOENT') throw error; }
     const lock = join(this.root, '.writer.lock');
-    let handle;
-    try { handle = await open(lock, 'wx', 0o600); }
-    catch (error) {
-      if (error.code === 'EEXIST') throw Object.assign(new Error('Workflow store has a writer or interrupted transaction; inspect the lock before recovery'), { code: 'WORKFLOW_STORE_BUSY' });
-      throw error;
-    }
+    const { handle, trace } = await acquireWriter(this.root, admission);
     const token = randomUUID();
-    let result; let failure;
+    const ownerRecord = canonicalJSON({ pid: process.pid, token, created_at: new Date().toISOString(),
+      ...(admission?.operation ? { operation: admission.operation } : {}) });
+    let result; let failure; let failed = false; let lockIdentity;
     try {
-      await handle.writeFile(canonicalJSON({ pid: process.pid, token, created_at: new Date().toISOString() }));
+      lockIdentity = await handle.stat({ bigint: true });
+      await handle.writeFile(ownerRecord);
       await handle.sync();
+      if (admission?.onAcquired) await admission.onAcquired();
+      if (trace) await admission.onWait(trace);
       result = await action();
-    } catch (error) { failure = error; }
+    } catch (error) { failure = error; failed = true; }
     const cleanup = [];
     try { await handle.close(); } catch (error) { cleanup.push(error); }
     try {
-      const owner = JSON.parse(await readBounded(lock, 4096));
-      requireValue(owner.token === token, 'LOCK_OWNERSHIP', 'Writer lock ownership changed');
-      await unlink(lock);
+      await retireOwnedFile(lock, { stagingRoot: join(this.root, '.pending'), expectedIdentity: lockIdentity, validate: bytes => {
+        const owner = JSON.parse(bytes);
+        requireValue(canonicalJSON(owner) === ownerRecord, 'LOCK_OWNERSHIP', 'Writer lock ownership changed');
+        return owner.pid;
+      } });
     } catch (error) { cleanup.push(error); }
-    if (cleanup.length) throw new AggregateError([...(failure ? [failure] : []), ...cleanup], 'Store transaction/lock cleanup failed');
-    if (failure) throw failure;
+    if (cleanup.length) {
+      const failures = [...(failed ? [failure] : []), ...cleanup];
+      throw Object.assign(new AggregateError(failures, 'Store transaction/lock cleanup failed'), { details: retirementErrorDetails(failures) });
+    }
+    if (failed) throw failure;
     return result;
   }
 
   async inspectWriter() {
     try { return JSON.parse(await readBounded(join(this.root, '.writer.lock'), 4096)); }
-    catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+    catch (error) { if (error?.code === 'ENOENT') return null; throw error; }
   }
 
-  async recoverWriter(expectedToken) {
+  async recoverWriter(expectedToken, { expectedIdentity, expectedBytes } = {}) {
     const recovery = join(this.root, '.recovery.lock');
     await noSymlinks(this.root);
     await mkdir(recovery); // Only one recovery operation may move a stale lock.
-    let result; let failure;
+    const recoveryIdentity = await lstat(recovery);
+    let result; let failure; let failed = false;
     try {
-      const owner = await this.inspectWriter();
+      let owner;
+      if(expectedBytes!==undefined){const bytes=await readBounded(join(this.root,'.writer.lock'),4096);
+        requireValue(Buffer.isBuffer(expectedBytes)&&bytes.equals(expectedBytes),'LOCK_OWNERSHIP','Recovery owner bytes differ from the exact prior inspection');owner=JSON.parse(bytes);}
+      else owner=await this.inspectWriter();
       requireValue(owner && owner.token === expectedToken && Number.isInteger(owner.pid) && owner.pid > 0, 'LOCK_OWNERSHIP', 'Recovery requires the inspected owner token');
       let absent = false;
-      try { process.kill(owner.pid, 0); } catch (error) { if (error.code === 'ESRCH') absent = true; else throw error; }
+      try { process.kill(owner.pid, 0); } catch (error) { if (error?.code === 'ESRCH') absent = true; else throw error; }
       requireValue(absent, 'WRITER_ACTIVE', 'Lock owner is still alive; no automatic takeover');
       await ensureDirectory(join(this.root, '.trash'));
-      const retained = join(this.root, '.trash', `writer-${randomUUID()}.json`);
-      await rename(join(this.root, '.writer.lock'), retained);
+      const retired = await retireOwnedFile(join(this.root, '.writer.lock'), {
+        stagingRoot: join(this.root, '.trash'), retain: true, expectedIdentity, validate: bytes => {
+          requireValue(expectedBytes===undefined||Buffer.isBuffer(expectedBytes)&&bytes.equals(expectedBytes),
+            'LOCK_OWNERSHIP','Recovery owner bytes differ from the exact prior inspection');
+          requireValue(canonicalJSON(JSON.parse(bytes)) === canonicalJSON(owner), 'LOCK_OWNERSHIP', 'Recovery owner changed after inspection');
+          return owner.pid;
+        },
+      });
       await syncDirectory(this.root);
-      result = { recovered: true, retained_at: retained };
-    } catch (error) { failure = error; }
-    try { await rmdir(recovery); }
-    catch (error) { throw new AggregateError([...(failure ? [failure] : []), error], 'Recovery cleanup failed'); }
-    if (failure) throw failure;
+      result = { recovered: true, retained_at: retired.retired_path };
+    } catch (error) { failure = error; failed = true; }
+    try {
+      const current = await lstat(recovery);
+      requireValue(current.isDirectory() && current.dev === recoveryIdentity.dev && current.ino === recoveryIdentity.ino,
+        'LOCK_OWNERSHIP', 'Recovery directory ownership changed; preserve it');
+      await rmdir(recovery);
+    }
+    catch (error) { throw new AggregateError([...(failed ? [failure] : []), error], 'Recovery cleanup failed'); }
+    if (failed) throw failure;
     return result;
   }
 
@@ -148,7 +378,7 @@ export class WorkflowStore {
     }
   }
 
-  async snapshot(id, revision) {
+  async metadata(id, revision) {
     const pack = packDirectory(this.root, id);
     await noSymlinks(pack);
     let document;
@@ -156,27 +386,102 @@ export class WorkflowStore {
       requireValue(/^[a-f0-9]{64}$/.test(revision), 'INVALID_REVISION', 'Revision must be a SHA-256 digest');
       document = { ...JSON.parse(await readBounded(join(pack, 'revisions', revision + '.json'), LIMITS.definition * 2)), revision_hash: revision };
     } else document = JSON.parse(await readBounded(join(pack, 'workflow.json'), LIMITS.definition * 2));
-    const { revision_hash, ...snapshot } = document;
+    // This head-only local configuration marker is not part of the immutable
+    // source snapshot. It commits atomically with the selected source revision.
+    const { workflow_local_bindings, revision_hash, ...snapshot } = document;
+    requireValue(workflow_local_bindings === undefined || workflow_local_bindings === true,
+      'WORKFLOW_INSTALLATION', 'Workflow local binding scope marker is invalid');
     validateWorkflowShape(snapshot.workflow);
     requireValue(snapshot.workflow.id === id && Number.isSafeInteger(snapshot.workflow.revision) && snapshot.workflow.revision > 0, 'WORKFLOW_ID_MISMATCH', 'Pack identity or revision number is invalid');
     validateManifest(snapshot.resources);
     requireValue(revisionHash(snapshot) === revision_hash, 'REVISION_CORRUPT', 'Workflow revision hash mismatch');
-    for (const resource of snapshot.resources) {
-      const bytes = await readBounded(join(pack, 'objects', resource.sha256), LIMITS.resource);
-      requireValue(bytes.length === resource.bytes && digest(bytes) === resource.sha256, 'RESOURCE_CORRUPT', `Resource content hash mismatch: ${resource.path}`);
+    return { ...snapshot, revision_hash };
+  }
+
+  async snapshot(id, revision) {
+    const { snapshot } = await this.snapshotWithResources(id, revision);
+    return snapshot;
+  }
+
+  async snapshotWithResources(id, revision) {
+    const started = performance.now(), snapshot = await this.metadata(id, revision);
+    const pack = packDirectory(this.root, id), resources = Object.create(null), objects = new Map();
+    let objectReadCount = 0, verifiedBytes = 0;
+    try {
+      for (const resource of snapshot.resources) {
+        let bytes = objects.get(resource.sha256);
+        if (!bytes) {
+          bytes = await readBounded(join(pack, 'objects', resource.sha256), LIMITS.resource);
+          objectReadCount++;
+          requireValue(digest(bytes) === resource.sha256, 'RESOURCE_CORRUPT', `Resource content hash mismatch: ${resource.path}`);
+          objects.set(resource.sha256, bytes); verifiedBytes += bytes.length;
+        }
+        requireValue(bytes.length === resource.bytes, 'RESOURCE_CORRUPT', `Resource size mismatch: ${resource.path}`);
+        resources[resource.path] = bytes;
+      }
+    } catch (error) {
+      console.error('[pi-CAW] resource scan failed', { workflow_id: id, revision_hash: snapshot.revision_hash,
+        object_read_count: objectReadCount, error_code: error?.code ?? 'UNKNOWN' });
+      throw error;
     }
-    return document;
+    return { snapshot, resources, resource_scan: { workflow_id: id, revision_hash: snapshot.revision_hash,
+      resource_count: snapshot.resources.length, object_read_count: objectReadCount, verified_resource_bytes: verifiedBytes,
+      elapsed_ms: Number((performance.now() - started).toFixed(3)) } };
   }
 
   async resources(id, revision) {
-    const snapshot = await this.snapshot(id, revision);
-    const resources = Object.create(null);
-    for (const item of snapshot.resources) {
-      const bytes = await readBounded(join(packDirectory(this.root, id), 'objects', item.sha256), LIMITS.resource);
-      requireValue(bytes.length === item.bytes && digest(bytes) === item.sha256, 'RESOURCE_CORRUPT', 'Resource changed during export');
-      resources[item.path] = bytes;
+    return (await this.snapshotWithResources(id, revision)).resources;
+  }
+
+  installationRecordPath(id, revision, name) {
+    requireValue(/^[a-f0-9]{64}$/.test(revision), 'INVALID_REVISION', 'Revision must be a SHA-256 digest');
+    requireValue(['source-package', 'installation', 'local-bindings'].includes(name), 'WORKFLOW_INSTALLATION', 'Unknown installation record');
+    return join(packDirectory(this.root, id), 'installations', revision, `${name}.json`);
+  }
+
+  async hasLocalBindingScope(id) {
+    // Pre-creation graph validation has no Pack yet, hence no local scope.
+    const head = await optionalJSON(join(packDirectory(this.root, id), 'workflow.json'), LIMITS.definition * 2);
+    if (head === null) return false;
+    requireValue(head.workflow_local_bindings === undefined || head.workflow_local_bindings === true,
+      'WORKFLOW_INSTALLATION', 'Workflow local binding scope marker is invalid');
+    return head.workflow_local_bindings === true;
+  }
+
+  async installationRecord(id, revision, name) {
+    const paths = [this.installationRecordPath(id, revision, name), join(packDirectory(this.root, id), `${name}.json`)];
+    const max = name === 'source-package' ? 70 * 1024 * 1024 : name === 'local-bindings' ? 256 * 1024 : 1024 * 1024;
+    for (const [index, path] of paths.entries()) {
+      try {
+        await noSymlinks(path); const stat = await lstat(path);
+        requireValue(stat.isFile() && stat.nlink === 1 && stat.size <= max, 'WORKFLOW_INSTALLATION', 'Installation record must be a bounded regular file');
+        return { record: JSON.parse(await readBounded(path, max)), revision_specific: index === 0 };
+      } catch (error) { if (error?.code !== 'ENOENT') throw error; }
     }
-    return resources;
+    return null;
+  }
+
+  async sourcePackage(id, revision) {
+    const retained = await this.installationRecord(id, revision, 'source-package');
+    const installation = await this.installationRecord(id, revision, 'installation');
+    requireValue(!installation?.revision_specific || retained?.revision_specific,
+      'WORKFLOW_INSTALLATION', 'Revision-specific installation has no exact source package');
+    if (!retained) return null;
+    const checked = validateWorkflowPackage(retained.record);
+    requireValue(!retained.revision_specific || checked.snapshot.revision_hash === revision,
+      'WORKFLOW_PACKAGE_REVISION', 'Revision-specific source package belongs to a different revision');
+    return checked.snapshot.revision_hash === revision ? retained.record : null;
+  }
+
+  async installation(id, revision) {
+    const retained = await this.installationRecord(id, revision, 'installation');
+    if (!retained) return null;
+    const source = await this.sourcePackage(id, revision);
+    requireValue(!retained.revision_specific || source, 'WORKFLOW_INSTALLATION', 'Revision-specific installation has no exact source package');
+    if (!source) return null; // Legacy root metadata belongs only to its retained source revision.
+    requireValue(retained.record.package_sha256 === source.package_sha256 && retained.record.package_version === source.package.version,
+      'WORKFLOW_INSTALLATION', 'Installation metadata differs from its exact source package');
+    return retained.record;
   }
 
   async revisions(id) {
@@ -194,13 +499,21 @@ export class WorkflowStore {
   }
 
   async list() {
+    return this.listSnapshots(id => this.snapshot(id));
+  }
+
+  async listMetadata() {
+    return this.listSnapshots(id => this.metadata(id));
+  }
+
+  async listSnapshots(readSnapshot) {
     await noSymlinks(this.root);
     const result = [];
     for (const entry of await readdir(this.root, { withFileTypes: true })) {
-      if (['.writer.lock', '.recovery.lock', '.pending', '.trash'].includes(entry.name)) { await noSymlinks(join(this.root, entry.name)); continue; }
+      if (['.writer.lock', '.recovery.lock', '.pending', '.trash', '.admission-queue'].includes(entry.name)) { await noSymlinks(join(this.root, entry.name)); continue; }
       requireValue(entry.isDirectory() && !entry.isSymbolicLink() && /^wf-.+\.pack$/.test(entry.name), 'UNKNOWN_STORE_ENTRY', `Unexpected store entry: ${entry.name}`);
       const id = workflowId(entry.name.slice(3, -5));
-      result.push(await this.snapshot(id));
+      result.push(await readSnapshot(id));
     }
     return result.sort((a, b) => a.workflow.id < b.workflow.id ? -1 : 1);
   }
@@ -211,7 +524,7 @@ export class WorkflowStore {
       const path = join(pack, 'objects', hash);
       try { await writeExclusive(path, bytes); }
       catch (error) {
-        if (error.code !== 'EEXIST') throw error;
+        if (error?.code !== 'EEXIST') throw error;
         requireValue(digest(await readBounded(path, LIMITS.resource)) === hash, 'RESOURCE_CORRUPT', 'Existing object is corrupt');
       }
     }
@@ -220,7 +533,7 @@ export class WorkflowStore {
     requireValue(Buffer.byteLength(encoded) <= LIMITS.definition * 2, 'WORKFLOW_SIZE', 'Workflow snapshot exceeds size limit');
     try { await writeExclusive(revisionPath, encoded); }
     catch (error) {
-      if (error.code !== 'EEXIST') throw error;
+      if (error?.code !== 'EEXIST') throw error;
       requireValue((await readBounded(revisionPath, LIMITS.definition * 2)).toString() === encoded, 'REVISION_CORRUPT', 'Existing immutable revision differs');
     }
     await syncDirectory(join(pack, 'objects'));
@@ -239,7 +552,7 @@ export class WorkflowStore {
     return this.withWriter(async () => {
       const destination = packDirectory(this.root, next.id);
       try { await lstat(destination); throw Object.assign(new Error('Workflow already exists'), { code: 'WORKFLOW_EXISTS' }); }
-      catch (error) { if (error.code !== 'ENOENT') throw error; }
+      catch (error) { if (error?.code !== 'ENOENT') throw error; }
       const temporary = insideRoot(this.root, join(this.root, '.pending', randomUUID()));
       await noSymlinks(dirname(temporary));
       await mkdir(temporary);
@@ -263,8 +576,11 @@ export class WorkflowStore {
     });
   }
 
-  async install(document, { resources = {}, installation } = {}) {
+  async install(document, { resources = {}, installation, sourcePackage, localBindings, expected_revision } = {}) {
     document = JSON.parse(canonicalJSON(document));
+    if (installation) installation = JSON.parse(canonicalJSON(installation));
+    if (sourcePackage) sourcePackage = JSON.parse(canonicalJSON(sourcePackage));
+    if (localBindings) localBindings = JSON.parse(canonicalJSON(localBindings));
     const { revision_hash, ...snapshot } = document;
     requireValue(/^[a-f0-9]{64}$/.test(revision_hash) && revisionHash(snapshot) === revision_hash,
       'WORKFLOW_PACKAGE_REVISION', 'Installed Workflow snapshot must retain its exact immutable revision identity');
@@ -276,20 +592,64 @@ export class WorkflowStore {
       && (installation.source === null || typeof installation.source === 'string' && installation.source.length <= 8192)
       && typeof installation.package_version === 'string' && /^[a-f0-9]{64}$/.test(installation.package_sha256)
       && typeof installation.installed_at === 'string', 'WORKFLOW_INSTALLATION', 'Local installation metadata is invalid');
-    this.validate(snapshot.workflow);
+    // Source graph integrity is independent of the receiving Host's execution
+    // catalog. Portable imports may be retained while local setup is pending;
+    // every launch still passes the full runtime validator and binding preflight.
+    if (sourcePackage) {
+      const checked = validateWorkflowPackage(sourcePackage);
+      requireValue(canonicalJSON(checked.snapshot) === canonicalJSON(document) && checked.package_sha256 === installation.package_sha256,
+        'WORKFLOW_PACKAGE_REVISION', 'Retained package differs from the installed snapshot');
+      validateWorkflowShape(snapshot.workflow);
+    } else this.validate(snapshot.workflow);
+    if (localBindings) requireValue(sourcePackage && canonicalJSON(localBindings) === canonicalJSON(emptyWorkflowBindings(document)),
+    'PI_WORKFLOW_BINDINGS', 'Imported local model bindings must start empty');
     requireWorkflowSnapshotIntegrity(snapshot);
+    requireValue(expected_revision === undefined || typeof expected_revision === 'string' && /^[a-f0-9]{64}$/.test(expected_revision),
+      'INVALID_REVISION', 'Package update requires an exact previously read revision hash');
     return this.withWriter(async () => {
       const destination = packDirectory(this.root, snapshot.workflow.id);
+      if (expected_revision !== undefined) {
+        const previous = await this.snapshot(snapshot.workflow.id);
+        requireValue(previous.revision_hash === expected_revision, 'REVISION_CONFLICT', 'Workflow changed since it was read');
+        requireValue(sourcePackage && localBindings, 'WORKFLOW_INSTALLATION', 'Package update requires the source package and empty local bindings');
+        requireValue(previous.revision_hash !== revision_hash, 'WORKFLOW_PACKAGE_REVISION_EXISTS', 'This source revision is already installed; existing bindings were preserved');
+        await this.sourcePackage(snapshot.workflow.id, previous.revision_hash);
+        await this.installation(snapshot.workflow.id, previous.revision_hash);
+        // Validate reused objects before staging any new content. The old head
+        // and its records remain authoritative until the single atomic rename.
+        for (const hash of prepared.blobs.keys()) {
+          try { requireValue(digest(await readBounded(join(destination, 'objects', hash), LIMITS.resource)) === hash,
+            'RESOURCE_CORRUPT', 'Existing object is corrupt'); }
+          catch (error) { if (error?.code !== 'ENOENT') throw error; }
+        }
+        const records = dirname(this.installationRecordPath(snapshot.workflow.id, revision_hash, 'installation'));
+        try { await lstat(records); throw Object.assign(new Error('This source revision already has retained installation records; bindings were preserved'), { code: 'WORKFLOW_PACKAGE_REVISION_EXISTS' }); }
+        catch (error) { if (error?.code !== 'ENOENT') throw error; }
+        await ensureDirectory(dirname(records)); await mkdir(records);
+        await writeExclusive(join(records, 'installation.json'), canonicalJSON(installation));
+        await writeExclusive(join(records, 'source-package.json'), canonicalJSON(sourcePackage));
+        await writeExclusive(join(records, 'local-bindings.json'), canonicalJSON(localBindings));
+        await syncDirectory(records); await syncDirectory(dirname(records));
+        const installed = await this.persistSnapshot(destination, snapshot, prepared.blobs);
+        await replaceJSON(join(destination, 'workflow.json'), { ...installed, workflow_local_bindings: true });
+        return { ...installed, installation: JSON.parse(canonicalJSON(installation)) };
+      }
       try { await lstat(destination); throw Object.assign(new Error('Workflow already exists'), { code: 'WORKFLOW_EXISTS' }); }
-      catch (error) { if (error.code !== 'ENOENT') throw error; }
+      catch (error) { if (error?.code !== 'ENOENT') throw error; }
       const temporary = insideRoot(this.root, join(this.root, '.pending', randomUUID()));
       await noSymlinks(dirname(temporary)); await mkdir(temporary);
       try {
         await mkdir(join(temporary, 'objects')); await mkdir(join(temporary, 'revisions'));
         const installed = await this.persistSnapshot(temporary, snapshot, prepared.blobs);
         requireValue(installed.revision_hash === revision_hash, 'WORKFLOW_PACKAGE_REVISION', 'Installed Workflow revision changed while staging');
-        await writeExclusive(join(temporary, 'workflow.json'), canonicalJSON(installed));
-        await writeExclusive(join(temporary, 'installation.json'), canonicalJSON(installation));
+        await writeExclusive(join(temporary, 'workflow.json'), canonicalJSON({ ...installed, ...(localBindings ? { workflow_local_bindings: true } : {}) }));
+        const records = sourcePackage ? join(temporary, 'installations', revision_hash) : temporary;
+        if (sourcePackage) { await mkdir(join(temporary, 'installations')); await mkdir(records); }
+        await writeExclusive(join(records, 'installation.json'), canonicalJSON(installation));
+        if (sourcePackage) await writeExclusive(join(records, 'source-package.json'), canonicalJSON(sourcePackage));
+        if (localBindings) await writeExclusive(join(records, 'local-bindings.json'), canonicalJSON(localBindings));
+        await syncDirectory(records);
+        if (sourcePackage) await syncDirectory(dirname(records));
         await syncDirectory(temporary); await rename(temporary, destination); await syncDirectory(this.root);
         return {...installed,installation:JSON.parse(canonicalJSON(installation))};
       } catch (error) {
@@ -315,6 +675,7 @@ export class WorkflowStore {
     requireValue(workflow.id === id, 'WORKFLOW_ID_MISMATCH', 'Save cannot change Workflow ID');
     return this.withWriter(async () => {
       const previous = await this.snapshot(id);
+      const localBindingScope = await this.hasLocalBindingScope(id);
       requireValue(previous.revision_hash === expected_revision, 'REVISION_CONFLICT', 'Workflow changed since it was read');
       const resourceData = preparedResources ?? { manifest: previous.resources, blobs: new Map() };
       const snapshot = {
@@ -327,7 +688,7 @@ export class WorkflowStore {
       const document = await this.persistSnapshot(pack, snapshot, resourceData.blobs);
       const temporary = join(pack, 'workflow.json.tmp-' + randomUUID());
       try {
-        await writeExclusive(temporary, canonicalJSON(document));
+        await writeExclusive(temporary, canonicalJSON({ ...document, ...(localBindingScope ? { workflow_local_bindings: true } : {}) }));
         let purgeRecord=null;
         if(history_purge!=='none'){
           purgeRecord={schema_version:1,state:'prepared',revision_hash:document.revision_hash,keep_objects:document.resources.map(item=>item.sha256).sort(),prepared_at:new Date().toISOString()};
@@ -421,7 +782,7 @@ export class WorkflowStore {
       let previous;
       try { previous = await this.snapshot(id); }
       catch (error) {
-        if (allow_missing && error.code === 'ENOENT') return { id, purged: false, missing: true };
+        if (allow_missing && error?.code === 'ENOENT') return { id, purged: false, missing: true };
         throw error;
       }
       requireValue(expected_revision === previous.revision_hash, 'REVISION_CONFLICT', 'Permanent purge requires the current revision hash');

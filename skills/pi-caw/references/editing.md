@@ -18,6 +18,10 @@
 
 ## Share or install
 
-Use `caw export_workflow_package` for one installable revision. Install a local file with `caw install_workflow_package` and `package_path`, or use its `url` option for HTTPS. Keep a full Pack diagnostic export separate from an installable package.
+Use `caw export_workflow_package` for one installable revision. Install a local file with `caw install_workflow_package` and `package_path`, or `source_url` for HTTPS. CAW and Pi packages retain their original graph, resources and revision. Imported child slots start unbound: the user chooses model and thinking in the Workflow Models tab. Main still inherits the current chat. Inspect `read.validation.launch_ready` and its errors/blockers; source Ready alone does not establish local readiness. Keep a full Pack diagnostic export separate from an installable package.
+
+For an explicitly requested update of an existing package, read its current revision first and pass that exact `expected_revision` to `install_workflow_package`. The update preserves old revisions and Run pins; child bindings for the new source revision start empty. A same or previously retained source revision rejects instead of resetting human model choices.
+
+For read-only retained authoring inspection, use `authoring_discover` with the source `workflow_id`/`revision_hash`, then `authoring_preview` with the selected `run_id`. These calls do not advance the Run or invoke models. Preserve the returned exact preview identity when accepting a proposal.
 
 Use [repair loops](loops.md) for bounded review/repair and [parallel writes](parallel.md) for worktree integration.

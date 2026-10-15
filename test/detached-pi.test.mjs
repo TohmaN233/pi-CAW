@@ -23,10 +23,15 @@ import { sourceRuntimeFixture } from './sdk-runtime-fixtures.mjs';
 async function until(read, accepts, ms = 15000) {
   const deadline = Date.now() + ms; let last;
   while (Date.now() < deadline) { last = await read(); if (accepts(last)) return last; await new Promise(resolveWait => setTimeout(resolveWait, 25)); }
-  assert.fail(`Timed out waiting for exact detached evidence: ${JSON.stringify(last)}`);
+  const evidence=last?.state?{run_id:last.state.run_id,status:last.state.status,sequence:last.sequence,
+    nodes:Object.fromEntries(Object.entries(last.state.nodes).map(([id,node])=>{
+      const attempt=node.attempts.at(-1),event=attempt?.executor_events?.at(-1);
+      return [id,{status:node.status,attempt_id:attempt?.id,error:node.error,last_event:event?{kind:event.kind,tool:event.metadata?.tool,phase:event.metadata?.phase}:null}];
+    }))}:last;
+  assert.fail(`Timed out waiting for exact detached evidence: ${JSON.stringify(evidence)}`);
 }
 
-test('parent Main RPC keeps the original actor, exact results, operation callbacks and single dispatch', async t => {
+test('parent Main RPC keeps the original actor, exact results and callbacks across successful semantic turns', async t => {
   const operations = [], authorizations = [], main_actor = 'exact-parent', run_id = 'bridge-test';
   let actor = main_actor, calls = 0, closes = 0, aborts = 0;
   const owner = await createOwnerRpcServer({ run_id, handle: async (operation, args) => {
@@ -50,8 +55,8 @@ test('parent Main RPC keeps the original actor, exact results, operation callbac
   assert.deepEqual(await ownerRpc(bridge.descriptor, 'run_main_task', { task_handle, prompt: 'Exact prompt', schema: {} }), exactResult);
   assert.deepEqual(operations, [{ operation_id, metadata: { phase: 'completed', tool: 'read_workspace' } }]);
   assert.deepEqual(authorizations, [{ operation_id }]);
-  await assert.rejects(ownerRpc(bridge.descriptor, 'run_main_task', { task_handle, prompt: 'Replay', schema: {} }), { code: 'PI_PARENT_MAIN_REPLAY' });
-  assert.equal(calls, 1);
+  assert.deepEqual(await ownerRpc(bridge.descriptor, 'run_main_task', { task_handle, prompt: 'Host semantic correction', schema: {} }), exactResult);
+  assert.equal(calls, 2);assert.equal(closes,0);
   actor = 'another-chat';
   await assert.rejects(ownerRpc(bridge.descriptor, 'main_identity'), { code: 'PI_MAIN_SESSION_CHANGED' });
   await assert.rejects(ownerRpc(bridge.descriptor, 'create_main_task', request), { code: 'PI_MAIN_SESSION_CHANGED' });
@@ -60,7 +65,7 @@ test('parent Main RPC keeps the original actor, exact results, operation callbac
   assert.equal(aborts, 1, 'Teardown must address the original acquired task');
   assert.deepEqual(await ownerRpc(bridge.descriptor, 'close_main_task', { task_handle }), { quiescent: true });
   assert.deepEqual(await ownerRpc(bridge.descriptor, 'close_main_task', { task_handle }), { quiescent: true });
-  await bridge.close(); assert.equal(closes, 1); assert.equal(calls, 1);
+  await bridge.close(); assert.equal(closes, 1); assert.equal(calls, 2);
 });
 
 test('nested Run and Role notifications never terminate the root owner, and queued events retain their exact identities', async () => {
@@ -151,10 +156,16 @@ export const provider=fixture.provider;
     thinkingLevel: 'off', isProjectTrusted: () => false, abort: () => { void session.abort(); } };
   const host = new PiSdkHost({ sdk: activeSdk, Type: ai.Type, supportedThinking: ai.getSupportedThinkingLevels, agentDir,
     getContext: () => context, detachedNativeProviderModules: [pathToFileURL(fixtureModule).href],
-    deliverMain: prompt => { void session.prompt(prompt).catch(error => errors.push({ message: error.message })); } });
+    deliverMain: prompt => { void session.prompt(prompt,{streamingBehavior:'followUp'}).catch(error => errors.push({ message: error.message })); } });
   const loader = new sdk.DefaultResourceLoader({ cwd, agentDir, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
     extensionFactories: [{ name: 'offline-current-chat-fixture', factory: pi => {
       pi.on('before_agent_start', event => { host.main.begin(event.prompt); });
+      pi.on('message_start', event => {
+        if(event.message.role==='user'){
+          const content=event.message.content;
+          host.main.begin(typeof content==='string'?content:content.filter(item=>item.type==='text').map(item=>item.text).join('\n'));
+        }
+      });
       pi.on('agent_end', async () => { await host.main.end(); });
       pi.on('tool_call', event => host.main.guard(event));
       pi.registerTool({ name: 'caw', label: 'Offline parent fixture', description: 'Exercise original-chat Main only',
@@ -186,13 +197,13 @@ export const provider=fixture.provider;
   const graph=workflow([agent('work')]);graph.nodes.find(node=>node.id==='final').executor.mode='orchestration';
   await service.store.create(graph);
   const tool = (action, args) => ai.fauxAssistantMessage(ai.fauxToolCall('caw', { action, ...(args ? { args } : {}) }), { stopReason: 'toolUse' });
-  parentFaux.setResponses([tool('main_task'), tool('main_tool', { name: 'run_task_program', args: { program: 'node', args: ['-e', 'process.stdout.write("detached Main operation")'], cwd: 'workspace' } }),
+  parentFaux.setResponses([ai.fauxAssistantMessage('A completed turn without the required Main protocol result.'),tool('main_task'), tool('main_tool', { name: 'run_task_program', args: { program: 'node', args: ['-e', 'process.stdout.write("detached Main operation")'], cwd: 'workspace' } }),
     tool('main_result', { result: { text: 'Original Pi chat Main completed' }, summary: 'Exact detached Main result' }), ai.fauxAssistantMessage('Main done.')]);
   const started = await service.call('run', { workflow_id: 'example', workspace: cwd, access: 'read_only', inputs: { task: 'Offline detached test' } });
   runId = started.run_id;
   const owner = await service.detachedOwners.read(runId);
   assert.notEqual(owner.pid, process.pid); assert.equal(owner.detached ?? true, true);
-  const beforeDetach = await until(() => service.runtime.runs.read(runId), value => value.state.nodes.work.status === 'running' && !!value.state.nodes.work.attempts.at(-1)?.dispatch?.receipt);
+  const beforeDetach = await until(() => service.runtime.runs.observe(runId), value => value.state.nodes.work.status === 'running' && !!value.state.nodes.work.attempts.at(-1)?.dispatch?.receipt);
   const exactChildAttempt = beforeDetach.state.nodes.work.attempts.at(-1).id;
   const registryBeforeDetach = service.detachedOwners;
   await service.close();
@@ -210,7 +221,7 @@ export const provider=fixture.provider;
     controller_hash: waitingBeforeMain.state.control_hash, parent_bridge: { url: 'http://127.0.0.1:1/owner-rpc', token: 'a'.repeat(64), owner_id: randomUUID(), run_id: runId, main_actor: 'substitute-parent' } }), { code: 'OWNER_REATTACH_IDENTITY' });
   service = await new PiCawService({ directory, host, notify: event => notifications.push(event) }).initialize();
   await service.call('run_snapshot', { run_id: runId });
-  const record = await until(() => service.runtime.runs.read(runId), value => !!value.state.nodes.final.attempts.at(-1)?.result_proposal);
+  const record = await until(() => service.runtime.runs.observe(runId), value => !!value.state.nodes.final.attempts.at(-1)?.result_proposal);
   assert.equal(record.state.main_actor, manager.getSessionId());
   assert.equal(record.state.nodes.work.status, 'succeeded');
   assert.equal(record.state.nodes.work.attempts.length, 1); assert.equal(record.state.nodes.work.attempts[0].id, exactChildAttempt);
@@ -219,6 +230,8 @@ export const provider=fixture.provider;
   assert.notEqual(child.dispatch.receipt.thread_id, manager.getSessionId());
   assert.equal(final.dispatch.receipt.session_id, manager.getSessionId());
   assert.equal(final.dispatch.receipt.executor, 'pi-current-chat-main');
+  assert.equal(final.completion_turns,2,'The owner must reserve the missing-protocol correction over reverse RPC');
+  assert.ok(final.executor_events.some(event=>event.kind==='semantic_blocked'&&/PI_MAIN_RESULT_MISSING/.test(event.metadata.reason)));
   assert.ok(final.executor_events.some(event => event.kind === 'tool_operation' && event.metadata.phase === 'completed' && event.metadata.tool === 'run_task_program'));
   const proposed = await service.runtime.runs.readExecutorResult(runId, final.id, final.result_proposal.sha256);
   assert.equal(proposed.structured_output.text, 'Original Pi chat Main completed');
@@ -311,7 +324,17 @@ export const provider=fixture.provider;
   const started = await service.call('start_authoring', { workflow_id: pack.workflow.id, revision_hash: pack.revision_hash,
     run_id: `authoring-${randomUUID()}` }, { human: true });
   runId = started.run_id;
-  const reviewed = await until(() => service.runtime.runs.read(runId), value => !!value.state.nodes.final.attempts.at(-1)?.result_proposal);
+  // This fixture already receives the exact owner's completion notification.
+  // Replaying and hashing its growing journal every 25ms competes with the
+  // detached writer under Windows test concurrency. Wait without disk reads,
+  // then perform the same strict journal assertions once the owner is ready.
+  await until(async()=>{
+    const failure=notifications.find(event=>event.run_id===runId&&['failed','attention','cancelled'].includes(event.status));
+    if(failure)throw Object.assign(new Error(failure.error?.message??`Detached authoring reported ${failure.status}`),{code:failure.error?.code??'TEST_DETACHED_AUTHORING_FAILED'});
+    return notifications.find(event=>event.run_id===runId&&event.status==='awaiting_acceptance');
+  },Boolean);
+  const reviewed = await service.runtime.runs.observe(runId);
+  assert(reviewed.state.nodes.final.attempts.at(-1)?.result_proposal,'The owner notification must follow the exact final proposal');
   for (const stage of ['expand', 'graph_assembly', 'execution_binding', 'deterministic_validation']) assert.equal(reviewed.state.nodes[stage].status, 'succeeded');
   const final = reviewed.state.nodes.final.attempts.at(-1);
   assert.equal(final.dispatch.receipt.executor, 'pi-sdk-authoring-review');

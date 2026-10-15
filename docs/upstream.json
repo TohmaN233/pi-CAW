@@ -96,6 +96,108 @@
         "Pi model/session receipts",
         "human final acceptance"
       ]
+    },
+    {
+      "source_kind": "installed_plugin",
+      "plugin": "codex-agents-workflow",
+      "version": "1.2",
+      "observed_date": "2026-10-12",
+      "pi_version": "0.4.0",
+      "feature": "Selective portable package, authoring and execution contracts",
+      "source_file_sha256": {
+        "authoring/authoring-workflows.mjs": "8b5fc480f1158de914e6a1bc49125ad525d07f7cf23cc4b92c02c5b67e7bfa77",
+        "execution/main-host-check.mjs": "a966d91ffbb05383f22692b361908fbf6373ad441c3f270dc6c8e21c447ecdae",
+        "execution/shared-prefix-contract.mjs": "0dd9733b32a2477bfe0dc0ff2600221eacd731638d0fe4ed9b69e376366ad075",
+        "execution/host-tool-runner.mjs": "ecff86b954c2cb0bba6b6432a45370645ed7c17feb9976ab5c58fcced2d3ed8e",
+        "runtime-requirements.mjs": "a442c78076317e5a6c21a6a3890e9dc795f2cfff5cc269e2da8be650656e2466",
+        "runtime-environment-state.mjs": "2fb7f8737f9f74e40e2fea881c2f1c4a9e8a047adfa8dea1a43898eefbc86f53",
+        "skill-import/callable-inventory.mjs": "81ab95841e6c4f52c61bd6c519cc7841e7d9693e1b6a6ddb56b2a17e17b3a30c",
+        "skill-import/callable-runtime-interface.mjs": "a599d0b2bdaf6e9cfc2447e1e40305757647728330380d7569451f6059d8ec27",
+        "skill-import/source-resource-mentions.mjs": "e6d93ddf7501867eef2a2fe388eef97a3ceb1c12cc59aebbfebbdd99cf721b0b",
+        "skill-import/import-reconciliation.mjs": "7de8a17beae00792d82ec74db8b9443116c2fcc49e4d4973f0f31f78c2b6e90d",
+        "skill-import/generation-preview.mjs": "93488159ea983a899dc5a5d8f017df7fe46ff872e30232221834acbee5428f22",
+        "workflow-validator.mjs": "10db211ba02976b91e74cac8ed70bbb4be1321ea1fba6a471dddb72f6d3e03f2",
+        "workflow-loops.mjs": "74149c7a03d3a6dd9f7fef98985e9d18a334fac598b553055c2e7ef78350aab6"
+      },
+      "preserved_pi_contracts": [
+        "exact source schema and coalesce",
+        "Pi SDK session receipts and original actor",
+        "human authoring publication",
+        "explicit Pi model bindings",
+        "deleted-default preservation"
+      ],
+      "note": "Observed installed artifact, not a claimed Git commit. Adapted selectively; Pi runtime transport remains independent."
+    },
+    {
+      "source_kind": "installed_plugin",
+      "plugin": "codex-agents-workflow",
+      "version": "1.2",
+      "observed_date": "2026-10-13",
+      "pi_version": "0.5.0",
+      "feature": "Complete input materials, post-projection shared inputs, owned temporary/output storage, exact claim retirement, ordered Run admission and isolated history maintenance",
+      "source_file_sha256": {
+        "execution/node-input-materials.mjs": "9b3ffba70e1e72124ef60ff9a98ab6027feea644194eb6578f3bf8de4dd91f1b",
+        "execution/host-main-fanout.mjs": "545cc217beb85d2f723919e1b772ad06667aa35a0279e246fcf482e552100692",
+        "execution/codex-common-batch-session.mjs": "6589db375e054a253aad6fde624f49f0fc690be9d7877955ff1ed25c72230da1",
+        "execution/owned-command-temp.mjs": "74731736970094a9bec69012c74858ee0566f1c6a5f584ecc6df651c3784bf0d",
+        "execution/codex-command-broker.mjs": "bbe2a575ff9e7183f908bceac33de7bf49bf7bae4250730b73f26f04969d1a8c",
+        "run-admission-queue.mjs": "de88a686158e9866fe5ae4e8bd86c2a955f1490482faa3fd0af00e97647724a9",
+        "owned-file-retirement.mjs": "c79de1126c4e54f2a50eaaf757e8b4574cdfdb2aa309f1da148002104e3b061e",
+        "run-history-maintenance.mjs": "4d180a9c322120d018cd6e7a94a546b1baca8c20786b124b6bd869b6d733e489",
+        "workflow-run-store.mjs": "6ba28628b38d8666c6faacfe17404493980ff6dbadc609537cef809e92c3dba1"
+      },
+      "preserved_pi_contracts": [
+        "immutable source packages and existing Run pins",
+        "explicit Pi bindings and original actor/session receipts",
+        "human publication and acceptance",
+        "independent Pi runtime transport",
+        "owned-effect shutdown before retention"
+      ],
+      "note": "Observed installed artifact, not a claimed newer package version or Git commit. Codex common-session fork/cache is reference-only and not migrated."
+    },
+    {
+      "source_kind": "installed_plugin",
+      "plugin": "codex-agents-workflow",
+      "version": "1.2",
+      "observed_date": "2026-10-14",
+      "pi_version": "0.5.2",
+      "feature": "Pinned Host deadlines and reconciled error receipts, atomic ticket replacement observation and explicit current-Main semantic authoring loops",
+      "source_file_sha256": {
+        "execution/host-tool-runner.mjs": "bda4f03469bc0618fe3e86fb3c1012a84d7fa42ba3298297bd76026832b9fcf1",
+        "run-admission-queue.mjs": "b914de4cd476288e33339f39c5febee8824a5e5a22445d004c85764c7d12471c",
+        "authoring/semantic-loops.mjs": "dd4583a1a708e55b0bb930bc9973196795fc6b5e1508d925b72b4b24026b6b92"
+      },
+      "preserved_pi_contracts": [
+        "original portable source envelopes and immutable revisions",
+        "Pi implementation identities and intent-matched receipts",
+        "ordinary finite fresh Main-worker/Provider reviews",
+        "unchanged ordinary program defaults and explicit model bindings",
+        "unconfirmed stop ownership"
+      ],
+      "note": "Only the first two modules differ from previously recorded hashes. Semantic authoring is a confirmed capability mismatch whose introduction date is unproven. Host/Main overlap and conditional dependency authoring are deferred; declared unsupported workspace policies fail visibly."
+    },
+    {
+      "source_kind": "observed_working_tree",
+      "repository": "https://github.com/TohmaN233/codex-agents-workflow",
+      "base_commit": "bfba60214acdda70b979ad82bc388856436e25fa",
+      "observed_date": "2026-10-14",
+      "pi_version": "0.5.3",
+      "feature": "Declared-product-only Host completion freshness, selective immutable legacy proof and source-authorized authoring checks",
+      "source_file_sha256": {
+        "execution/worker-host-check.mjs": "3bc7fa9bb97c2c7434db1ff7a5459adb1be34f5f86fbe12f59361cbc856f6ea8",
+        "execution/worker-artifact-snapshot.mjs": "3ddd664ea40b2a05332292a30d8a183fd6f53e93dffc25c65099df1644d3cc32",
+        "skill-import/conversion-contract.mjs": "e477d08326a28c48e35c4f4798c612b11285e6c43b92906c470d6d0f2767e81c",
+        "skill-import/review-checklist.mjs": "5ab61cc062d14a19f277cd5530e2c60a8fc1541da8db6d8e572ab4b14fb85b00",
+        "authoring/blueprint-contract.mjs": "11bd121c3d8609ea5c483fa5942fd5a23e84f86ec55dbb9f7211c97432e0e3a8"
+      },
+      "preserved_pi_contracts": [
+        "exact intent, receipt, output, tool and lease identity",
+        "declared product scope and real file-mutation rejection",
+        "immutable legacy check records without effect replay",
+        "source-defined Host tools and completion contracts",
+        "user-edited workflows, local model bindings and existing Run pins"
+      ],
+      "note": "Observed active upstream working source, not a claimed published release or installed artifact update. Snapshot policy follows explicit required_artifacts only; grants and model-observed changed paths do not add product authority."
     }
   ]
 }

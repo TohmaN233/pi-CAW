@@ -52,9 +52,9 @@ export async function reviewImportedDraft(store, workflowId, { expected_revision
   }
   requireValue(expansion.review_contract_version,'CONVERSION_REVIEW_CONTRACT_STALE','Private conversion Draft is missing its review contract identity');
   const resources=await store.resources(workflowId,pack.revision_hash);
-  const deployed=compileDeployableConversion({workflow,proposal:expansion.canonical_proposal,resources,pack,proposalHash:expansion.proposal_hash,
+  const deployed=compileDeployableConversion({workflow,proposal:expansion.canonical_proposal,resources,pack:{...pack,import_report:{...pack.import_report,review_history}},proposalHash:expansion.proposal_hash,
     reviewContractVersion:expansion.review_contract_version});
-  deployed.import_report.review_history=review_history;
+  // The deployable compiler sanitizes the exact reviewed history.
   deployed.import_report.expansion.certificate=createConversionCertificate(deployed.workflow,deployed.resources,{source_revision:pack.revision_hash,
     source_hash:deployed.provenance.source_hash,proposal_hash:expansion.proposal_hash,review_contract_version:expansion.review_contract_version});
   const saved=await store.save(workflowId,deployed.workflow,{expected_revision,resources:deployed.resources,provenance:deployed.provenance,

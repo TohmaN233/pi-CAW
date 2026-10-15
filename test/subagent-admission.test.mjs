@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fixture, workflow, agent, settle } from './fixtures.mjs';
 import { resolvedSubagentPlan } from '../core/workflow-runtime.mjs';
+import { revisionHash } from '../core/workflow-revisions.mjs';
 
 test('auto without fan-out starts one native Pi child and retains its configured count', async t => {
   const f = await fixture(t), graph = workflow([{ ...agent('work'), subagent_count: 'auto' }]);
@@ -42,8 +43,11 @@ for (const mode of ['fixed multiple', 'Main auto']) test(`${mode} is rejected on
 
 test('Pi preflight independently enforces fixed fan-out and Main count prohibitions', async t => {
   const f = await fixture(t);
-  const check = node => f.service.preflight({ provider_ids: [], packs: [{ workflow: { ...workflow(), nodes: [node] } }] });
-  assert.throws(() => check({ ...agent('work'), subagent_count: 2 }), { code: 'PI_POOL_JOIN_REQUIRED' });
-  assert.throws(() => check({ ...agent('final', { kind: 'main' }), subagent_count: 'auto' }), { code: 'SUBAGENT_COUNT' });
-  assert.throws(() => check({ ...agent('final', { kind: 'main' }), subagent_count: 1 }), { code: 'SUBAGENT_COUNT' });
+  const check = node => {
+    const pack = { workflow: { ...workflow(), nodes: [node] }, resources: [], provenance: {}, import_report: {} };
+    return f.service.preflight({ provider_ids: [], packs: [{ ...pack, revision_hash: revisionHash(pack) }] });
+  };
+  await assert.rejects(check({ ...agent('work'), subagent_count: 2 }), { code: 'PI_POOL_JOIN_REQUIRED' });
+  await assert.rejects(check({ ...agent('final', { kind: 'main' }), subagent_count: 'auto' }), { code: 'SUBAGENT_COUNT' });
+  await assert.rejects(check({ ...agent('final', { kind: 'main' }), subagent_count: 1 }), { code: 'SUBAGENT_COUNT' });
 });

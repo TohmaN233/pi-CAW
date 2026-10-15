@@ -1,10 +1,22 @@
 # 可移植行为与验证对照
 
+0.5.10 补齐逐项结果的纯语义预检、同 worker 拒收修复、已成功兄弟项保留及有界修复预算；支持原工作流的 literal argv/stdin 程序与后台 continuation 接口。沿用 Pi 自己的进程、输出和效果所有权，不假称实现了 Codex thread fork/cache。Windows native 程序有真实进程回归；真实 WSL literal 执行尚未实测。
+
+0.5.9 明确沿用 CAW 的普通读取/资源审计分离：`read` 不扫描全部资源，`audit` 才整包核验；实际资源消费者验证其选中的 bytes。Pi 的租约、父 Run、进度和 detached owner 使用 Host append-only 日志的增量状态，不为每次小事件重读整份历史。Host 自动化并投影材料，节点只接收当前职责所需输入。可移植图、来源保真、Host 接口可执行和真实 SDK 完整路径验证是不同证据，不能仅凭导入 Ready 或路由成功就宣称复杂 Workflow 已兼容。
+
 基线为 `upstream.json` 固定的 Codex Agents Workflow 1.1.1 源码、默认配置、control-plane/ orchestration Skills 和 Workbench。对照的是原版已经实现的可移植行为，不把新的 Pi API 愿望当成原版遗漏。
 
 功能已经接线、离线 fixture 通过、真实 SDK smoke 通过和真实用户环境验证是不同层次。这里不声明无条件 full parity 或所有功能已实测。付费模型、实际用户 MCP OAuth、WSL 和所有 Host 版本不在离线 fixture 的证明范围内。
 
+0.5.2 对照上次记录的 22 个 CAW 1.2 文件摘要，仅 Host runner 与 admission queue 两个文件发生变化；已适配固定一小时时限、实际资源程序时限、出错停机回执与原子 ticket 替换复核，并补齐语义 authoring 的显式 current-Main 循环。这不证明已迁入所有未记录过旧摘要的模块。
+
+后续可移植差异分两步处理：先加入有源证据和独占分支证明的条件 runtime dependency 投影；再完整实现 Host 工具与只读 Main overlap 的不可变源副本、attempt 所有权、独立 effect 审计和 fail-fast join。当前不支持该 parallel workspace policy，明确报 `PI_WORKSPACE_POLICY_UNSUPPORTED`；普通 parallel/worktree 并不等价。两项均须专门端到端验收，不能只放宽 schema。
+
+0.4.0 进一步对照已安装的 CAW 1.2：增加原包保真导入/导出、本机独立模型绑定、v32 authoring、只读 preview/discovery、node runtime requirements、Host completion checks、Main worker 逐项工作区及显式 current Main loops。新增契约及证据见 [PORTABLE-WORKFLOWS.md](PORTABLE-WORKFLOWS.md)。仍有明确边界：未提供双向通用 CAW importer 升级；Pi 的 shared-prefix 是内容投影，不保证传输缓存；目录 fan-out 仅支持 one_per_item；无条件自动发布、Codex 专用执行传输及新的默认模型绑定不迁入。
+
 ## 对照
+
+0.5.0 增补完整输入材料与提示字节预算、共享字段投影后一致性、独立 native TEMP 与完整日志分块、物理身份核验的锁退休、跨进程短事务排队和独立历史维护 worker。详见 [EXECUTION-MATERIALS.md](EXECUTION-MATERIALS.md)。保留真实 Pi actor/session/usage 与人工发布边界；不迁入 Codex session fork/cache 或产品专用执行 API。
 
 | 原版行为 | Pi 实现 | 当前证据或待验证边界 |
 | --- | --- | --- |

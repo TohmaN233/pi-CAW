@@ -1,6 +1,7 @@
 import { requireValue } from './workflow-paths.mjs';
 
 export const MAIN_EXECUTION_MODES = ['worker', 'orchestration'];
+export const isOrchestrationMain = node => node.executor?.kind === 'main' && node.executor.mode === 'orchestration';
 export function checkedMainMode(mode) {
   requireValue(MAIN_EXECUTION_MODES.includes(mode), 'MAIN_EXECUTION_MODE', 'Main mode must be worker or orchestration');
   return mode;

@@ -1,3 +1,4 @@
+import { PROGRAM_ENVIRONMENT_ADMISSION,PROGRAM_EXECUTION_RELEASE,validateHostToolContract } from './host-tool-runner.mjs';
 import { readFileSync } from 'node:fs';
 import { lstat, readFile, readdir, unlink } from 'node:fs/promises';
 import { extname, isAbsolute, join, relative } from 'node:path';
@@ -40,22 +41,39 @@ function toolValue(result){
   return JSON.parse(result.contentItems[0].text);
 }
 
-export function workflowResourceProgramRegistry(){
+export function workflowResourceProgramRegistry({createBroker=createPiToolBroker}={}){
+  requireValue(typeof createBroker==='function','WORKFLOW_RESOURCE_BROKER','Resource execution needs a trusted broker factory');
   const active=new Map();
   const identity=workflowResourceProgramIdentity(),broker_id='workflow-resource-program-broker';
   const evidence_sha256=digest(canonicalJSON({broker_id,identity,scope:'run-pinned-workflow-resource'}));
-  const key=context=>`${context.run_id}/${context.node_id}/${context.attempt_id}`;
+  const key=context=>`${context.run_id}/${context.node_id}/${context.attempt_id}${context.execution_slot?`/${context.execution_slot}`:''}`;
   return {[name]:{
+    [PROGRAM_ENVIRONMENT_ADMISSION]:true,
+    [PROGRAM_EXECUTION_RELEASE]({context}){
+      const entry=active.get(key(context));
+      requireValue(entry?.settled&&entry.quiescent,'WORKFLOW_RESOURCE_STOP','Resource acknowledgment requires settled execution and confirmed termination');
+      active.delete(key(context));
+    },
+    // This protocol executes the exact pinned resource, rather than a fixed
+    // application operation. Qualify its finite interface explicitly and retain
+    // the actual Pi adapter build in every receipt; source graph pins stay exact.
+    qualifyContract(pinned){
+      requireValue(pinned.identity?.name===name&&pinned.identity.version===version&&pinned.argv.length>=3,'WORKFLOW_RESOURCE_CONTRACT','Only the supported resource-program protocol can use this adapter');
+      return validateHostToolContract({...pinned,identity});
+    },
     identity,attestation:{qualified:true,cancellable:true,effect_observation:true,tool_identity:identity,broker_id,evidence_sha256},
-    async execute({input,argv,permissions,context,signal}){
+    async execute({input,argv,env,permissions,context,signal}){
       requireValue(argv.length>=3&&typeof context.workspace==='string'&&isAbsolute(context.workspace),'WORKFLOW_RESOURCE_CONTRACT','Resource program needs a workspace, program, resource and scratch directory');
       const [program,resourcePath,scratch,...args]=argv;
       const resource=context.resources?.find(item=>item.path===resourcePath);
       requireValue(resource&&digest(resource.bytes)===resource.sha256,'WORKFLOW_RESOURCE_PIN','Executable resource is absent or differs from its Run pin');
       requireValue(permissions.write_paths.some(root=>within(scratch,root)),'WORKFLOW_RESOURCE_SCOPE','Scratch directory is outside the Host write scope');
       const before=await captureWorkspaceSnapshot(context.workspace);
-      const entry={before,workspace:context.workspace,writePaths:permissions.write_paths,broker:null};
+      let settle;
+      const entry={before,workspace:context.workspace,writePaths:permissions.write_paths,broker:null,quiescent:false,settled:false,
+        completion:new Promise(resolve=>{settle=resolve;})};
       active.set(key(context),entry);
+      try{
       const authorize=async()=>{requireValue(!signal?.aborted,'WORKFLOW_RESOURCE_CANCELLED','Resource execution authority was revoked');};
       const materialized=(context.resources??[]).map(item=>({path:item.path,sha256:item.sha256,
         destination:`${scratch}/${item.sha256}${extname(item.path)}`}));
@@ -66,10 +84,12 @@ export function workflowResourceProgramRegistry(){
       let run=null,error=null;
       try{
         await authorize();
-        const broker=await createPiToolBroker({workspace:context.workspace,access:'bounded_write',allowedPaths:permissions.write_paths,
-          resources:context.resources,executionBinding:context.execution_binding,runtimeEnvironment:context.runtime_environment,prepareRuntimeEnvironment:context.prepareRuntimeEnvironment,
+        const broker=await createBroker({workspace:context.workspace,access:'bounded_write',allowedPaths:permissions.write_paths,programOutputMode:'actual',
+          programDeadlineMs:context.deadline_ms,
+          resources:context.resources,programEnvironment:env,executionBinding:context.execution_binding,runtimeEnvironment:context.runtime_environment,prepareRuntimeEnvironment:context.prepareRuntimeEnvironment,
+          ...(context.program_output_directory?{programOutputDirectory:context.program_output_directory,retainProgramOutput:true}:{}),
           inputRoots:typeof context.task_root==='string'&&isAbsolute(context.task_root)?[{name:'task_root',path:context.task_root}]:[],
-          authorize,onOperation:async()=>{}});
+          authorize,onOperation:metadata=>context.onOperation?.(metadata)});
         entry.broker=broker;
         toolValue(await broker.call('mkdir_workspace',{path:scratch},'scratch'));
         for(const item of materialized){
@@ -103,12 +123,17 @@ export function workflowResourceProgramRegistry(){
       finally{
         try{
           if(entry.broker){const stopped=await entry.broker.quiesce();
+            entry.quiescent=stopped.quiescent===true;
             requireValue(stopped.quiescent,'WORKFLOW_RESOURCE_STOP','Program did not settle cleanly');
             if(stopped.error && stopped.error.code!=='PI_EXECUTION_CANCELLED')throw stopped.error;}
+          else entry.quiescent=true;
           for(const item of temporary){const absolute=join(context.workspace,...item.destination.split('/'));
             try{if(digest(await readFile(absolute))===item.sha256)await unlink(absolute);}
             catch(cleanupError){if(cleanupError.code!=='ENOENT')throw cleanupError;}}
-        }finally{active.delete(key(context));}
+        }catch(cleanupError){
+          if(error!==null&&error!==cleanupError)throw Object.assign(new AggregateError([error,cleanupError],'Resource execution and cleanup both failed'),{quiescent:entry.quiescent});
+          throw cleanupError;
+        }
       }
       const observed=workspaceEffects(before,await captureWorkspaceSnapshot(context.workspace),permissions.write_paths);
       const outside=observed.outside_paths.length>0;
@@ -118,11 +143,19 @@ export function workflowResourceProgramRegistry(){
       return {exit_code:error||outside?1:run?.exit_code??1,output,
         diagnostic:error?`${error.code??'WORKFLOW_RESOURCE_ERROR'}: ${error.message}`
           :outside?`Program wrote outside declared scope: ${observed.outside_paths.join(', ')}`:run?.stderr??'',effects:observed};
+      }finally{entry.settled=true;settle();}
     },
     async cancel({context}){
       const entry=active.get(key(context));
       if(entry?.broker){const result=await entry.broker.quiesce();requireValue(result.quiescent,'WORKFLOW_RESOURCE_STOP','Program cancellation did not confirm termination');if(result.error&&result.error.code!=='PI_EXECUTION_CANCELLED')throw result.error;}
+      if(entry&&!entry.settled){
+        let timer;
+        try{const settled=await Promise.race([entry.completion.then(()=>true),new Promise(resolve=>{timer=setTimeout(()=>resolve(false),5000);})]);
+          requireValue(settled,'WORKFLOW_RESOURCE_STOP','Resource cancellation did not settle its exact adapter cleanup');}
+        finally{clearTimeout(timer);}
+      }
       const observed=entry?workspaceEffects(entry.before,await captureWorkspaceSnapshot(entry.workspace),entry.writePaths):emptyEffects();
+      if(entry)active.delete(key(context));
       return {termination_confirmed:true,evidence:[{kind:'workflow-resource-program-quiescent',sha256:digest(canonicalJSON({context,broker_id}))}],effects:observed};
     },
   }};

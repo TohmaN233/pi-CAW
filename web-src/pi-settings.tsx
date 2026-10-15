@@ -11,9 +11,10 @@ export function BindingPicker({ models, binding, change }: { models: Json[], bin
     onChange={value => { if (!value) change(null); else { const selected = models.find(item => `${item.provider}/${item.model_id}` === value); if (!selected) throw new Error('Selected Pi model disappeared from the catalog'); change({ provider: selected.provider, model_id: selected.model_id, thinking: '' }); } }}/>
     {binding && <Select label={t('思考强度（必须明确选择）', 'Thinking (explicit selection required)')} value={binding.thinking}
       options={[{ value: '', label: t('请选择思考强度', 'Choose thinking') }, ...(model?.thinking_levels ?? []).map((value: string) => ({ value, label: value }))]}
-      onChange={thinking => change({ provider: binding.provider, model_id: binding.model_id, thinking })}/>}
+      onChange={thinking => change({ ...binding, thinking })}/>}
     {binding && !model && <p role="alert">{t('此绑定不在当前 Pi 对话的可用目录中。请明确重新绑定。', 'This binding is unavailable in the current Pi conversation catalog. Rebind explicitly.')}</p>}
     {binding?.fingerprint && model && binding.fingerprint !== model.fingerprint && <p role="alert">{t('模型契约已变化，请重新选择模型并保存。', 'The model contract changed. Select the model again and save.')}</p>}
+    {binding?.thinking && model && !model.thinking_levels.includes(binding.thinking) && <p role="alert">{t('所选思考强度不在当前模型目录中，请明确重新选择。', 'The selected thinking level is unavailable for this model. Choose it again explicitly.')}</p>}
   </div>;
 }
 

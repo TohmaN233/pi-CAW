@@ -6,6 +6,15 @@ the initiating conversation, without triggering a model turn, and excludes it
 from model context. Internal operation changes update cards even when the
 top-level status text stays the same.
 
+Full `pi-caw:completion` Workflow Result cards also remain UI records only.
+Before model conversion, `projectWorkflowContext` replaces each with one compact
+`pi-caw:notification`: Run identity/status, artifact paths, and a bounded summary
+or error. Duplicate deliveries appear once. Node histories, result bodies,
+approval records and card details are not injected. Historical cards use the
+same projection without rewriting persisted chats; completion wake-up rules
+and independent Role result delivery remain unchanged. Detailed results are
+available through the UI, artifacts and on-demand `get`/`inspect_run` reads.
+
 `PiCawService.call('inspect_run', {run_id, node_id?, attempt_id?, session_index?, before?})`
 is a portable read-only inspector. It reads exact Host journals and native SDK
 session receipts without contacting detached workers or admitting execution.
@@ -14,6 +23,13 @@ Provider configuration. Clients cannot supply filesystem paths. Native headers
 and `pi-caw:task` Run/node bindings are verified before reading messages.
 Current-chat orchestration exposes its attempt operations and result, without
 copying unrelated parent history.
+
+Run observation, listing and this inspector validate journal and immutable pin
+bytes without joining writer admission. They remain available when a prior
+writer or admission ticket requires explicit recovery. A torn journal tail,
+invalid hash chain or mismatched pins is still an error; observation never
+repairs a journal or retires an ownership record. Execution and mutations keep
+their exclusive admission boundary.
 
 Details load only on expansion. Reads are bounded to a 1 MiB window and 40
 messages with byte cursors for earlier pages. Partial live JSONL lines wait for

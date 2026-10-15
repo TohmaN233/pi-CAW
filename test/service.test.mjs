@@ -68,16 +68,14 @@ test('a Host without isolated Main support fails before Run creation rather than
   await assert.rejects(f.service.call('run', { workflow_id: 'example', workspace: f.workspace, access: 'read_only', inputs: { task: 'test' } }), { code: 'PI_MAIN_ISOLATION_UNAVAILABLE' });
   assert.equal(f.requests.length, 0); assert.equal((await f.service.call('runs')).length, 0);
 });
-test('the shipped example imports and runs only with an explicitly configured reviewer', async t => {
+test('the shipped example imports unbound and runs only after explicit local reviewer selection', async t => {
   const f = await fixture(t), bundle = JSON.parse(await readFile(new URL('../examples/review-task.pi-caw.json', import.meta.url), 'utf8'));
-  await assert.rejects(f.service.call('install', { package: bundle }), { code: 'WORKFLOW_NOT_READY' });
-  const config = await f.service.call('settings');
-  config.settings.providers.push({ ...config.settings.providers[0], id: 'reviewer', name: 'Reviewer', binding: null });
-  await f.service.call('save_settings', { settings: config.settings, expected_revision: config.revision }, { human: true });
-  await f.service.call('install', { package: bundle });
+  const installed = await f.service.call('install', { package: bundle }, { human: true });
+  assert.equal(installed.validation.launch_ready, false);
   await assert.rejects(f.service.call('run', { workflow_id: 'review-task', workspace: f.workspace, access: 'read_only', inputs: { task: 'review' } }), { code: 'PI_MODEL_BINDING_REQUIRED' });
-  const bound = await f.service.call('settings'); bound.settings.providers[1].binding = bound.settings.providers[0].binding;
-  await f.service.call('save_settings', { settings: bound.settings, expected_revision: bound.revision }, { human: true });
+  const config = await f.service.call('settings');
+  await f.service.call('save_workflow_bindings', { workflow_id: 'review-task', workflow_revision: installed.revision_hash,
+    expected_revision: installed.model_bindings.revision, providers: { reviewer: config.settings.providers[0].binding } }, { human: true });
   const run = await f.service.call('run', { workflow_id: 'review-task', workspace: f.workspace, access: 'read_only', inputs: { task: 'review' } });
   assert.equal((await settle(f.service, run.run_id)).state.nodes.review.status, 'succeeded');
 });

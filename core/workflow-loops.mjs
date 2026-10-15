@@ -8,6 +8,14 @@ const object = value => value && typeof value === 'object' && !Array.isArray(val
 const definitions = workflow => workflow.loops ?? [];
 const finished = new Set(['succeeded', 'skipped', 'failed', 'cancelled']);
 const own = (record, key, value) => Object.defineProperty(record, key, { value, enumerable: true, configurable: true, writable: true });
+/** A declared rejection may flow as data only when acceptance gates release. */
+export function requiresAcceptedOutput(expression, nodeId) {
+  if (expression?.op === 'and') return expression.args?.some(child => requiresAcceptedOutput(child, nodeId)) === true;
+  if (expression?.op !== 'eq' || expression.args?.length !== 2) return false;
+  const [left, right] = expression.args;
+  return left?.path === `/nodes/${nodeId}/output/accepted` && right?.value === true
+    || right?.path === `/nodes/${nodeId}/output/accepted` && left?.value === true;
+}
 const publicLoop = loop => Object.fromEntries(['round', 'status', 'feedback', 'all_accepted', 'review_items', 'repair_items'].map(key => [key, loop[key]]));
 function refreshContext(state, context) {
   context.loops = Object.fromEntries(Object.entries(state.loops ?? {}).map(([id, loop]) => [id, publicLoop(loop)]));
@@ -40,9 +48,10 @@ export function validateLoopRegions(workflow) {
     requireValue(parts[0] === 'inputs' || parts[0] === 'nodes' && graph.nodes.has(parts[1]) && parts[2] === 'output' || parts[0] === 'loops' && definitions(workflow).some(loop => loop.id === parts[1]) && ['round', 'status', 'feedback', 'all_accepted', 'review_items', 'repair_items'].includes(parts[2]), 'LOOP_BINDING_INVALID', 'Loop bindings may read Run inputs, node outputs or public loop fields', { pointer });
   };
   for (const loop of definitions(workflow)) {
-    requireValue(object(loop) && Object.keys(loop).every(key => ['id', 'entry_node', 'exit_node', 'node_ids', 'max_rounds', 'until', 'feedback_bindings', 'item_scope'].includes(key)), 'LOOP_SCHEMA', 'Loop contains unsupported fields');
+    requireValue(object(loop) && Object.keys(loop).every(key => ['id', 'entry_node', 'exit_node', 'node_ids', 'max_rounds', 'until', 'feedback_bindings', 'item_scope', 'review_context'].includes(key)), 'LOOP_SCHEMA', 'Loop contains unsupported fields');
     requireValue(typeof loop.id === 'string' && /^[a-z0-9][a-z0-9._-]{0,63}$/.test(loop.id) && !ids.has(loop.id), 'LOOP_SCHEMA', 'Loop IDs must be unique portable identifiers'); ids.add(loop.id);
-    requireValue(Number.isSafeInteger(loop.max_rounds) && loop.max_rounds >= 1, 'LOOP_SCHEMA', 'Loop max_rounds must be a positive integer', { loop_id: loop.id });
+    requireValue(loop.review_context === undefined || loop.review_context === 'current_main', 'LOOP_REVIEW_CONTEXT', 'Unknown loop review context', { loop_id: loop.id });
+    requireValue(Number.isSafeInteger(loop.max_rounds) && loop.max_rounds >= 1 || loop.max_rounds === null && loop.review_context === 'current_main', 'LOOP_SCHEMA', 'Loop max_rounds must be a positive integer, or explicit null for current Main review until accepted', { loop_id: loop.id });
     requireValue(Array.isArray(loop.node_ids) && loop.node_ids.length > 0 && new Set(loop.node_ids).size === loop.node_ids.length && loop.node_ids.every(id => graph.nodes.has(id)), 'LOOP_REGION_INVALID', 'Loop node_ids must name unique existing nodes', { loop_id: loop.id });
     const members = new Set(loop.node_ids);
     requireValue(members.has(loop.entry_node) && members.has(loop.exit_node), 'LOOP_REGION_INVALID', 'Loop boundaries must belong to the region', { loop_id: loop.id });
@@ -77,7 +86,12 @@ export function validateLoopRegions(workflow) {
     for (const node of workflow.nodes.filter(node => node.type === 'parallel')) requireValue(members.has(node.id) === members.has(node.join_id), 'LOOP_PARALLEL_BOUNDARY', 'A parallel node and its join must belong to the same loop region', { loop_id: loop.id, node_id: node.id });
     const exit = graph.nodes.get(loop.exit_node);
     requireValue(!(exit.completion_contract?.fail_on_false?.length), 'LOOP_EXIT_GUARD', 'A loop review exit must return rejection as semantic data', { loop_id: loop.id });
-    if (['agent', 'skill_ref'].includes(exit.type)) requireValue(exit.access === 'read_only' && (exit.executor?.kind === 'provider' || exit.executor?.kind === 'main' && (exit.executor.mode ?? 'worker') === 'worker' || exit.executor?.kind === 'thread' && exit.executor.lifecycle === 'start'), 'LOOP_REVIEW_CONTEXT', 'A loop Agent exit must be an independent read-only reviewer', { loop_id: loop.id });
+    if (loop.review_context === 'current_main') {
+      requireValue(exit.type === 'agent' && exit.executor?.kind === 'main' && exit.executor.mode === 'orchestration'
+        && exit.access === 'read_only' && !exit.completion_contract?.host_check && !exit.required_artifacts?.length && !exit.fanout
+        && exit.outputs_schema?.properties?.accepted?.type === 'boolean' && (exit.outputs_schema.required ?? []).includes('accepted')
+        && requiresAcceptedOutput(loop.until, exit.id), 'LOOP_REVIEW_CONTEXT', 'Current Main loop review requires a read-only initiating conversation with explicit acceptance gating and no mechanical completion effects', { loop_id: loop.id });
+    } else if (['agent', 'skill_ref'].includes(exit.type)) requireValue(exit.access === 'read_only' && (exit.executor?.kind === 'provider' || exit.executor?.kind === 'main' && (exit.executor.mode ?? 'worker') === 'worker' || exit.executor?.kind === 'thread' && exit.executor.lifecycle === 'start'), 'LOOP_REVIEW_CONTEXT', 'A loop Agent exit must use an independent review context; access is a separate Run-bounded authority', { loop_id: loop.id });
     validateExpression(loop.until, { onPointer: pointer=>checkAvailable(pointer,'exit') });
     if (loop.feedback_bindings !== undefined) {
       requireValue(object(loop.feedback_bindings), 'LOOP_SCHEMA', 'Loop feedback_bindings must be named bindings');
@@ -346,7 +360,7 @@ export function settleLoops(state, workflow, graph, context) {
     loop.feedback = definition.feedback_bindings ? structuredClone(resolveBindings(definition.feedback_bindings, context)) : {};
     refreshContext(state, context);
     const accepted = evaluateExpression(definition.until, context) && (!definition.item_scope || loop.all_accepted);
-    loop.status = accepted ? 'accepted' : loop.round >= definition.max_rounds ? 'exhausted' : 'rejected';
+    loop.status = accepted ? 'accepted' : definition.max_rounds !== null && loop.round >= definition.max_rounds ? 'exhausted' : 'rejected';
     recordRound(state, workflow, definition, loop, observations); changed = true;
     if (accepted) { releaseEdges(state, graph, definition, 'succeeded'); continue; }
     if (loop.status === 'exhausted') {

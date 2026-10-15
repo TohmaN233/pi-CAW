@@ -1,8 +1,12 @@
+import { prepareOwnedCommandTemp } from './owned-command-temp.mjs';
+import { createProgramOutput, PROGRAM_DISK_BYTES, programTextResult } from './program-output.mjs';
+import { augmentedRuntimeEnvironment } from '../runtime-environment-state.mjs';
 import { spawn, execFile } from 'node:child_process';
 import { lstat, readFile, readdir, open, rename, unlink, realpath, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, delimiter, dirname, isAbsolute, join, relative, sep, win32 } from 'node:path';
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep, win32 } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { StringDecoder } from 'node:string_decoder';
 import { resourcePath, requireValue, noSymlinks, ensureDirectory, insideRoot, canonicalNoLinks } from '../workflow-paths.mjs';
 import { pathBoundaries } from '../workflow-bindings.mjs';
 import { digest } from '../workflow-revisions.mjs';
@@ -20,6 +24,7 @@ const RECOVERABLE_TOOL_ERRORS = new Set([
   'PI_TOOL_WRITE_DENIED', 'PI_TOOL_DIRECTORY', 'PI_TOOL_DIRECTORY_LIMIT', 'PI_TOOL_FILE',
   'PI_TOOL_ENCODING', 'PI_RESOURCE_DENIED', 'PI_RESOURCE_RANGE', 'PI_RESOURCE_RANGE_LIMIT',
   'PI_RESOURCE_CHUNK',
+  'PI_PROGRAM_OUTPUT_ARGUMENTS', 'PI_PROGRAM_OUTPUT_DENIED',
   'PI_TOOL_WRITE_ARGUMENTS', 'PI_TOOL_WRITE_CONFLICT',
 ]);
 function windowsPathToWsl(path) {
@@ -72,28 +77,53 @@ async function liveNativeProcessGroup(pid) {
   }
   return members;
 }
+
+// execFile's callback runs after its child has closed, including timeout/error
+// paths. Retain a failed stop as uncertainty; neither parent closure nor a
+// nonzero taskkill reply establishes ownership of all descendants.
+export async function stopNativeWindowsTree(pid, { executor = execFile, timeoutMs = 5000, parentState = () => ({}) } = {}) {
+  requireValue(Number.isSafeInteger(pid) && pid > 0 && Number.isSafeInteger(timeoutMs) && timeoutMs > 0 && timeoutMs <= 5000,
+    'PI_EXECUTION_STOP_ARGUMENTS', 'Windows tree stop requires an exact PID and a bounded Host deadline');
+  const started = Date.now();
+  return new Promise((resolveStop, rejectStop) => {
+    executor(join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'taskkill.exe'), ['/PID', String(pid), '/T', '/F'],
+      { shell: false, windowsHide: true, timeout: timeoutMs, killSignal: 'SIGKILL', maxBuffer: 8192, encoding: 'utf8' },
+      (cause, stdout, stderr) => {
+        const state = parentState();
+        const details = { pid, helper_exit_code: typeof cause?.code === 'number' ? cause.code : cause ? null : 0,
+          helper_cause_code: typeof cause?.code === 'string' ? cause.code : null,
+          helper_duration_ms: Date.now() - started, helper_timeout_ms: timeoutMs, helper_killed: cause?.killed === true,
+          parent_exited: state.exited === true, parent_closed: state.closed === true,
+          helper_stdout: String(stdout ?? '').slice(0, 1000), helper_stderr: String(stderr ?? '').slice(0, 1000) };
+        if (cause) rejectStop(Object.assign(new Error('Windows native task tree stop failed', { cause }), { code: 'PI_EXECUTION_STOP_UNCONFIRMED', details }));
+        else resolveStop(details);
+      });
+  });
+}
 // Launcher, signaler and inspector are trusted lifecycle-test seams, never
 // Workflow inputs. POSIX tasks own a distinct process group without a sandbox.
 export async function executeNativeProgram(binding, request, roots, {
   signal, onHandle, env = process.env, processLauncher = spawn,
-  processSignaler = process.kill.bind(process), inspectProcessGroup = liveNativeProcessGroup,
+  processSignaler = process.kill.bind(process), inspectProcessGroup = liveNativeProcessGroup, outputSink,
 } = {}) {
   requireValue(binding?.kind === 'native' && Object.hasOwn(binding.programs, request.program)
     && Array.isArray(request.args) && request.args.length <= 256
     && request.args.every(value => typeof value === 'string' && value.length <= 8192 && !value.includes('\0'))
     && ['workspace', 'task_root'].includes(request.cwd) && (request.cwd !== 'task_root' || roots.task_root),
   'PI_EXECUTION_ARGUMENTS', 'Native task program arguments must match the discovered Host binding');
-  requireValue(roots.task_root || !request.args.some(value => value.includes('@TASK_ROOT@')), 'PI_EXECUTION_ARGUMENTS',
+  requireValue(request.literal || roots.task_root || !request.args.some(value => value.includes('@TASK_ROOT@')), 'PI_EXECUTION_ARGUMENTS',
     'Task-root path substitution needs a declared task_root input');
   if (signal?.aborted) throw signal.reason ?? executionError('PI_EXECUTION_CANCELLED', 'Native program was cancelled before launch');
   const program = binding.programs[request.program];
-  const args = request.args.map(value => value.replaceAll('@WORKSPACE@', roots.workspace)
+  const args = request.literal ? request.args : request.args.map(value => value.replaceAll('@WORKSPACE@', roots.workspace)
     .replaceAll('@TASK_ROOT@', roots.task_root ?? ''));
-  const cwd = request.cwd === 'workspace' ? roots.workspace : roots.task_root;
+  const cwd = request.workdir ?? (request.cwd === 'workspace' ? roots.workspace : roots.task_root);
+  requireValue(!request.literal || typeof request.stdin==='string' && Buffer.byteLength(request.stdin,'utf8')<=1024*1024
+    && within(roots.workspace,resolve(cwd)), 'PI_EXECUTION_ARGUMENTS', 'Literal program input and cwd must match the workspace contract');
   const posix = process.platform !== 'win32';
-  const child = processLauncher(program, args, { cwd, env, shell: false, windowsHide: true, detached: posix, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = processLauncher(program, args, { cwd, env, shell: false, windowsHide: true, detached: posix, stdio: [request.literal ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
   let closed = false, exited = false, quiescent = false, stopReason = null, timer, abort, bytes = 0, stopPromise = null, settled = false;
-  let exitCode = null, exitSignal = null;
+  let exitCode = null, exitSignal = null, stopDiagnostic = null;
   const stdout = [], stderr = [];
   let resolveClose, rejectClose;
   const done = new Promise((resolveDone, rejectDone) => { resolveClose = resolveDone; rejectClose = rejectDone; });
@@ -113,10 +143,7 @@ export async function executeNativeProgram(binding, request, roots, {
         await wait(10);
       }
     } else if (!posix && !exited && !closed && Number.isInteger(child.pid)) {
-      const helper = spawn(join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'taskkill.exe'), ['/PID', String(child.pid), '/T', '/F'],
-        { shell: false, windowsHide: true, stdio: 'ignore' });
-      const code = await new Promise((resolveStop, rejectStop) => { helper.once('error', rejectStop); helper.once('close', resolveStop); });
-      requireValue(code === 0, 'PI_EXECUTION_STOP_UNCONFIRMED', 'Windows native task tree stop failed');
+      stopDiagnostic = await stopNativeWindowsTree(child.pid, { parentState: () => ({ exited, closed }) });
     }
     if (!posix && !closed && !exited) child.kill('SIGKILL');
     let stopTimer;
@@ -130,14 +157,18 @@ export async function executeNativeProgram(binding, request, roots, {
     if (reason) stopReason ??= reason;
     if (quiescent) return Promise.resolve();
     if (!stopPromise) stopPromise = confirmStop().then(() => {
-      if (stopReason) settle(rejectClose, stopReason);
+      if (stopReason) {
+        if (stopDiagnostic) stopReason.details = { ...(stopReason.details ?? {}), ...stopDiagnostic };
+        settle(rejectClose, stopReason);
+      }
       else settle(resolveClose, { exit_code: exitCode, signal: exitSignal,
-        stdout: Buffer.concat(stdout).toString('utf8'), stderr: Buffer.concat(stderr).toString('utf8'),
-        output: Buffer.concat([...stdout, ...stderr]).toString('utf8') });
+        ...(outputSink ? {} : { stdout: Buffer.concat(stdout).toString('utf8'), stderr: Buffer.concat(stderr).toString('utf8'),
+        output: Buffer.concat([...stdout, ...stderr]).toString('utf8') }) });
     }).catch(cause => {
       const error = Object.assign(new AggregateError([...(stopReason ? [stopReason] : []), cause],
         'Native task stopped without confirmed process-group quiescence'), { code: 'PI_EXECUTION_STOP_UNCONFIRMED',
-        details: { pid: child.pid ?? null, process_group: posix ? child.pid ?? null : null, cause_code: cause.code ?? null } });
+        details: { pid: child.pid ?? null, process_group: posix ? child.pid ?? null : null, cause_code: cause.code ?? null,
+          ...(cause.details ?? {}) } });
       settle(rejectClose, error); throw error;
     }).finally(() => { stopPromise = null; });
     return stopPromise;
@@ -146,12 +177,15 @@ export async function executeNativeProgram(binding, request, roots, {
   const requestStop = reason => { void stop(reason).catch(error => settle(rejectClose, error)); };
   const handle = { done, stop, isQuiescent: () => quiescent };
   onHandle?.(handle);
-  const collect = target => chunk => {
-    bytes += chunk.length;
-    if (bytes > 1024 * 1024) { requestStop(executionError('PI_EXECUTION_OUTPUT', 'Native task program output exceeded 1 MiB')); return; }
-    target.push(chunk);
+  const collect = (target, stream) => chunk => {
+    try {
+      if (outputSink) { outputSink.write(stream, chunk); return; }
+      bytes += chunk.length;
+      requireValue(bytes <= PROGRAM_DISK_BYTES, 'PI_EXECUTION_OUTPUT', 'Native program output exceeded its finite capture limit');
+      target.push(chunk);
+    } catch (error) { requestStop(error); }
   };
-  child.stdout.on('data', collect(stdout)); child.stderr.on('data', collect(stderr));
+  child.stdout.on('data', collect(stdout, 'stdout')); child.stderr.on('data', collect(stderr, 'stderr'));
   child.once('error', cause => { stopReason ??= Object.assign(new Error(cause.message, {cause}), {
     code: 'PI_EXECUTION_LAUNCH', details: {dependency:request.program,cause_code:cause.code,child_started:Number.isInteger(child.pid)},
   }); });
@@ -169,6 +203,12 @@ export async function executeNativeProgram(binding, request, roots, {
   if (signal) signal.addEventListener('abort', abort, { once: true });
   if (signal?.aborted) abort();
   timer = setTimeout(() => requestStop(executionError('PI_EXECUTION_TIMEOUT', 'Native task program exceeded its Host deadline')), binding.command_timeout_ms);
+  if (request.literal) {
+    child.stdin.on('error', cause => requestStop(Object.assign(new Error('Native program stdin delivery failed', { cause }), {
+      code: 'PI_EXECUTION_STDIN', details: { cause_code: cause.code ?? null },
+    })));
+    child.stdin.end(Buffer.from(request.stdin ?? '', 'utf8'));
+  }
   return done;
 }
 function mountParents(paths) {
@@ -221,7 +261,7 @@ async function requireWritableTreeWithoutLinks(boundary) {
   };
   await visit(boundary);
 }
-export function boundProgramArgv(binding, { program, args, cwd }, roots, {masks = [], writable = [], executionId = ''} = {}) {
+export function boundProgramArgv(binding, { program, args, cwd, literal, workdir }, roots, {masks = [], writable = [], executionId = ''} = {}) {
   requireValue(Object.hasOwn(binding.programs, program) && Array.isArray(args) && args.length <= 256
     && args.every(value => typeof value === 'string' && value.length <= 8192 && !value.includes('\0'))
     && ['workspace', 'task_root'].includes(cwd), 'PI_EXECUTION_ARGUMENTS', 'Execution arguments must match the inherited host binding');
@@ -230,8 +270,8 @@ export function boundProgramArgv(binding, { program, args, cwd }, roots, {masks 
   requireValue(writablePaths.every(path=>path===workspace||path.startsWith(workspace+'/')),
     'PI_EXECUTION_SCOPE','Bound program writable paths must stay inside the workspace');
   const wholeWorkspace=writablePaths.includes(workspace),nestedWritable=wholeWorkspace?[]:writablePaths;
-  const directory = cwd === 'workspace' ? workspace : taskRoot;
-  const resolvedArgs=args.map(value=>value.replaceAll('@TASK_ROOT@',taskRoot).replaceAll('@WORKSPACE@',workspace));
+  const directory = workdir ? windowsPathToWsl(workdir) : cwd === 'workspace' ? workspace : taskRoot;
+  const resolvedArgs=literal ? args : args.map(value=>value.replaceAll('@TASK_ROOT@',taskRoot).replaceAll('@WORKSPACE@',workspace));
   const runtimeRoots=binding.runtime_roots;
   const path = [...new Set(Object.values(binding.programs).map(value => dirname(value)))].join(':');
   const parents=[...new Set([...mountParents([...runtimeRoots,workspace,taskRoot,...nestedWritable,...masks.map(item=>item.path)]),...runtimeRoots,workspace,taskRoot])]
@@ -255,7 +295,7 @@ async function prepareBoundExecution(binding,request,roots,{masks,writable}){
   try{
     const base=boundProgramArgv(binding,request,roots,{masks,writable,executionId});
     requireValue(base[0]==='-d'&&base[1]===binding.distribution&&base[2]==='--exec','PI_EXECUTION_BINDING','Bound execution launcher arguments are malformed');
-    return {binding,executionId,controlRoot,identityPath,argv:['-d',binding.distribution,'--exec','/bin/sh','-eu','-c',supervisorScript,'pi-bound-supervisor',windowsPathToWsl(identityPath),executionId,...base.slice(3)]};
+    return {binding,executionId,controlRoot,identityPath,literal:request.literal,stdin:request.stdin,argv:['-d',binding.distribution,'--exec','/bin/sh','-eu','-c',supervisorScript,'pi-bound-supervisor',windowsPathToWsl(identityPath),executionId,...base.slice(3)]};
   }catch(error){await rm(controlRoot,{recursive:true,force:true});throw error;}
 }
 async function executionIdentity(prepared,isClosed){
@@ -281,8 +321,8 @@ async function stopLinuxExecution(prepared,identity,processLauncher){
   });
   requireValue(code===0,'PI_EXECUTION_STOP_UNCONFIRMED','Exact Linux execution unit could not be confirmed stopped');
 }
-function launchBoundExecution(prepared,{signal,onHandle,processLauncher,removeControl}){
-  const child=processLauncher(prepared.binding.launcher,prepared.argv,{shell:false,windowsHide:true,stdio:['ignore','pipe','pipe']});
+function launchBoundExecution(prepared,{signal,onHandle,processLauncher,removeControl,outputSink}){
+  const child=processLauncher(prepared.binding.launcher,prepared.argv,{shell:false,windowsHide:true,stdio:[prepared.literal?'pipe':'ignore','pipe','pipe']});
   const stdout=[],stderr=[];let bytes=0,closed=false,quiescent=false,controlCleaned=false,exitCode=null,exitSignal=null,launchError=null,stopReason=null,stopPromise=null,cleanupPromise=null,timer,abort,doneSettled=false;
   let closeObserved;const closeSeen=new Promise(resolveClose=>{closeObserved=resolveClose;});
   let resolveDone,rejectDone;const done=new Promise((resolve,reject)=>{resolveDone=resolve;rejectDone=reject;});
@@ -317,12 +357,13 @@ function launchBoundExecution(prepared,{signal,onHandle,processLauncher,removeCo
   const handle={done,stop,isQuiescent:()=>quiescent&&controlCleaned};
   if(onHandle)onHandle(handle);
   const requestStop=reason=>{void stop(reason).catch(error=>settleDone(rejectDone,stopFailure(error)));};
-  const collect=target=>chunk=>{
-    bytes+=chunk.length;
-    if(bytes>1024*1024){requestStop(executionError('PI_EXECUTION_OUTPUT','Bound program output exceeded 1 MiB'));return;}
-    target.push(chunk);
+  const collect=(target,stream)=>chunk=>{
+    try {
+      if(outputSink){outputSink.write(stream,chunk);return;}
+      bytes+=chunk.length;requireValue(bytes<=PROGRAM_DISK_BYTES,'PI_EXECUTION_OUTPUT','Bound program output exceeded its finite capture limit');target.push(chunk);
+    }catch(error){requestStop(error);}
   };
-  child.stdout.on('data',collect(stdout));child.stderr.on('data',collect(stderr));
+  child.stdout.on('data',collect(stdout,'stdout'));child.stderr.on('data',collect(stderr,'stderr'));
   child.once('error',error=>{launchError=Object.assign(error,{code:'PI_EXECUTION_LAUNCH'});requestStop(launchError);});
   child.once('exit',(code,signalName)=>{exitCode=Number.isInteger(code)?code:null;exitSignal=signalName??null;});
   child.once('close',()=>{closed=true;quiescent=true;closeObserved();void(async()=>{
@@ -330,7 +371,7 @@ function launchBoundExecution(prepared,{signal,onHandle,processLauncher,removeCo
       await cleanupControl();
       if(stopReason)settleDone(rejectDone,stopReason);else if(launchError)settleDone(rejectDone,launchError);else{
         const stdoutText=Buffer.concat(stdout).toString('utf8'),stderrText=Buffer.concat(stderr).toString('utf8');
-        settleDone(resolveDone,{exit_code:exitCode,signal:exitSignal,stdout:stdoutText,stderr:stderrText,output:stdoutText+stderrText});
+        settleDone(resolveDone,{exit_code:exitCode,signal:exitSignal,...(outputSink?{}:{stdout:stdoutText,stderr:stderrText,output:stdoutText+stderrText})});
       }
     }catch(cleanupError){settleDone(rejectDone,Object.assign(new AggregateError([stopReason??launchError??cleanupError,cleanupError],'Bound execution ended but its host control state could not be cleaned'),{code:'PI_EXECUTION_CLEANUP'}));}
   })();});
@@ -338,17 +379,21 @@ function launchBoundExecution(prepared,{signal,onHandle,processLauncher,removeCo
   if(signal)signal.addEventListener('abort',abort,{once:true});
   if(signal?.aborted)abort();
   timer=setTimeout(()=>requestStop(executionError('PI_EXECUTION_TIMEOUT','Bound program exceeded its host deadline')),prepared.binding.command_timeout_ms);
+  if(prepared.literal){
+    child.stdin.on('error',cause=>requestStop(Object.assign(new Error('Bound program stdin delivery failed',{cause}),{code:'PI_EXECUTION_STDIN'})));
+    child.stdin.end(Buffer.from(prepared.stdin??'','utf8'));
+  }
   return handle;
 }
 // processLauncher/removeControl are trusted in-process lifecycle-test seams.
 // Workflow data never reaches them; production uses Node's process/filesystem.
-export async function executeBoundProgram(binding,request,roots,{signal,masks=[],writable=[],beforeSpawn,onHandle,processLauncher=spawn,removeControl=rm}={}){
+export async function executeBoundProgram(binding,request,roots,{signal,masks=[],writable=[],beforeSpawn,onHandle,processLauncher=spawn,removeControl=rm,outputSink}={}){
   const prepared=await prepareBoundExecution(binding,request,roots,{masks,writable});let launched=false;
   try{
     if(signal?.aborted)throw signal.reason instanceof Error?signal.reason:executionError('PI_EXECUTION_CANCELLED','Bound program was cancelled before launch');
     if(beforeSpawn)await beforeSpawn();
     if(signal?.aborted)throw signal.reason instanceof Error?signal.reason:executionError('PI_EXECUTION_CANCELLED','Bound program was cancelled before launch');
-    const handle=launchBoundExecution(prepared,{signal,onHandle,processLauncher,removeControl});launched=true;return await handle.done;
+    const handle=launchBoundExecution(prepared,{signal,onHandle,processLauncher,removeControl,outputSink});launched=true;return await handle.done;
   }finally{if(!launched)await rm(prepared.controlRoot,{recursive:true,force:true});}
 }
 function safeDiagnostic(error) {
@@ -357,20 +402,29 @@ function safeDiagnostic(error) {
     .replace(/((?:api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|password|cookie|secret)\s*[:=]\s*)\S+/ig, '$1[redacted]')
     .slice(0, 1000);
 }
-function argsShape(args, names) {
-  requireValue(args && typeof args === 'object' && !Array.isArray(args) && Object.keys(args).length === names.length && names.every(name => Object.hasOwn(args, name)), 'PI_TOOL_ARGUMENTS', 'Tool arguments must match the declared schema');
+function argsShape(args, names, required = names) {
+  requireValue(args && typeof args === 'object' && !Array.isArray(args) && Object.keys(args).every(name=>names.includes(name)) && required.every(name => Object.hasOwn(args, name)), 'PI_TOOL_ARGUMENTS', 'Tool arguments must match the declared schema');
 }
 
 // All file access is performed by this host broker. No shell or arbitrary-path
 // dynamic reader is exposed. This is an application boundary, not an OS ACL.
 export async function createPiToolBroker({ workspace, access, allowedPaths = [], deniedPaths = [], resources = [],
-  inputRoots = [], executionBinding, runtimeEnvironment, prepareRuntimeEnvironment, authorize, onOperation, recoverToolErrors = false,
+  inputRoots = [], executionBinding, programEnvironment, runtimeEnvironment, prepareRuntimeEnvironment, authorize, onOperation, recoverToolErrors = false,
+  programOutputMode = 'model', commandTempBase, prepareCommandTemp = prepareOwnedCommandTemp,
+  programOutputDirectory, retainProgramOutput = false, programDeadlineMs,
 }) {
   requireValue(['read_only', 'bounded_write'].includes(access) && typeof authorize === 'function' && typeof onOperation === 'function', 'PI_BROKER_AUTHORITY', 'The broker requires explicit access, a live lease check and a durable operation sink');
+  requireValue(['model','actual'].includes(programOutputMode), 'PI_BROKER_OUTPUT_MODE', 'Program output mode must be a Host-qualified model or actual operation');
+  requireValue(programDeadlineMs === undefined || Number.isSafeInteger(programDeadlineMs) && programDeadlineMs > 0 && programDeadlineMs <= 3600000,
+    'PI_BROKER_DEADLINE', 'A trusted Host program deadline must be between 1ms and one hour');
+  requireValue(typeof retainProgramOutput==='boolean' && (!retainProgramOutput || typeof programOutputDirectory==='string' && isAbsolute(programOutputDirectory)),
+    'PI_BROKER_OUTPUT_SCOPE', 'Retained program output requires an exact absolute Host-owned material directory');
+  requireValue(programOutputDirectory===undefined || typeof programOutputDirectory==='string' && isAbsolute(programOutputDirectory),
+    'PI_BROKER_OUTPUT_SCOPE', 'Program output directory must be an absolute Host path');
   await noSymlinks(workspace); const root = await realpath(workspace);
   const boundaries = pathBoundaries(allowedPaths).map(path => join(root, ...path.split('/')));
   requireValue(access !== 'bounded_write' || boundaries.length > 0, 'PI_BROKER_SCOPE', 'Write tools require concrete narrowed path boundaries');
-  const denied = await Promise.all(deniedPaths.map(path => canonicalNoLinks(path)));
+  const denied = await Promise.all([...deniedPaths,...(programOutputDirectory?[programOutputDirectory]:[])].map(path => canonicalNoLinks(path)));
   requireValue(Array.isArray(inputRoots) && inputRoots.length <= 32, 'PI_INPUT_ROOTS', 'Input roots must be a bounded array');
   const inputs = new Map();
   for (const item of inputRoots) {
@@ -380,15 +434,19 @@ export async function createPiToolBroker({ workspace, access, allowedPaths = [],
     inputs.set(item.name, path);
   }
   const qualifiedExecution = qualifiedExecutionBinding(executionBinding);
-  let execution = (access === 'bounded_write' ? qualifiedExecution : null) ?? nativeExecutionBinding(runtimeEnvironment);
+  const withDeadline = binding => binding && programDeadlineMs !== undefined ? { ...binding, command_timeout_ms: programDeadlineMs } : binding;
+  let execution = withDeadline((access === 'bounded_write' ? qualifiedExecution : null) ?? nativeExecutionBinding(runtimeEnvironment));
   if (execution?.kind === 'wsl') requireValue(inputs.has('task_root'), 'PI_EXECUTION_BINDING', 'Inherited WSL task execution requires a task_root input');
   const pinned = new Map();
-  requireValue(resources.length <= 512, 'PI_RESOURCE_LIMIT', 'Too many node resources');
-  let totalResourceBytes = 0;
+  requireValue(resources.filter(item=>item.material_kind!=='pi_node_input').length <= 512
+    &&resources.filter(item=>item.material_kind==='pi_node_input').length<=4096, 'PI_RESOURCE_LIMIT', 'Too many node resources or Host-prepared input materials');
+  let totalResourceBytes = 0,totalMaterialBytes=0;
   for (const item of resources) {
     const path = resourcePath(item.path); const bytes = Buffer.from(item.bytes);
-    totalResourceBytes += bytes.length;
-    requireValue(bytes.length <= MAX_FILE && totalResourceBytes <= 16 * MAX_FILE && !pinned.has(path) && digest(bytes) === item.sha256, 'PI_RESOURCE_PIN', 'Resource is duplicated, oversized or differs from its pin');
+    const material=item.material_kind==='pi_node_input';
+    if(material)totalMaterialBytes+=bytes.length;else totalResourceBytes += bytes.length;
+    requireValue(bytes.length <= (material?16*MAX_FILE:MAX_FILE) && totalResourceBytes <= 16 * MAX_FILE
+      &&totalMaterialBytes<=64*MAX_FILE && !pinned.has(path) && digest(bytes) === item.sha256, 'PI_RESOURCE_PIN', 'Resource or input material is duplicated, oversized or differs from its pin');
     pinned.set(path, { bytes, sha256: item.sha256 });
   }
   function locate(path, write = false, directory = false) {
@@ -439,49 +497,174 @@ export async function createPiToolBroker({ workspace, access, allowedPaths = [],
       { name: 'read_input', description: 'Read one bounded UTF-8 file beneath a host-authorized read-only task input root.', inputSchema: schema({ root: { type: 'string', enum: [...inputs.keys()] }, path: string }) },
     ] : []),
     ...(execution ? [{ name: 'run_task_program', description: 'Run one Host-resolved task program without a shell. Use this for CodeGraph, Git inspection and tests. cwd is a logical root; @WORKSPACE@ and, when available, @TASK_ROOT@ expand to exact paths. Inspect the exit code and output before reporting success.', inputSchema: schema({ program: { type: 'string', enum: Object.keys(execution.programs) }, args: { type: 'array', items: string, maxItems: 256 }, cwd: { type: 'string', enum: inputs.has('task_root') ? ['workspace', 'task_root'] : ['workspace'] } }) }] : []),
+    ...(execution ? [{name:'run_workspace_program',description:'Run a discovered executable path or exact alias with literal arguments in the node workspace. Optional stdin is exact UTF-8 and then closed. yield_time_ms defaults to 10000; 0 starts background work. Continue a returned session with continue_workspace_command. Inspect the final exit code before reporting success.',inputSchema:schema({program:string,args:{type:'array',items:string,maxItems:256},stdin:string,workdir:string,yield_time_ms:{oneOf:[{const:0},{type:'integer',minimum:10000,maximum:30000}]},max_output_tokens:{type:'integer',minimum:1,maximum:200000}},['program','args'])},
+      {name:'continue_workspace_command',description:'Wait for an owned program session and read the next bounded output chunk. Literal-program stdin is closed; chars may only be empty or Ctrl-C to stop the exact owned process. Final output_ref supports exact byte reads with read_program_output.',inputSchema:schema({session_id:string,chars:string,yield_time_ms:{type:'integer',minimum:0,maximum:30000},max_output_tokens:{type:'integer',minimum:1,maximum:200000}},['session_id'])}] : []),
+    ...(execution ? [{ name: 'read_program_output', description: 'Read exact captured stdout or stderr owned by this broker. Start at byte 0 and follow next_byte. Every reply is bounded after JSON serialization; data_base64 preserves every byte, text contains complete UTF-8 characters when available.', inputSchema: schema({output_id:string,stream:{type:'string',enum:['stdout','stderr']},start_byte:{type:'integer',minimum:0},max_bytes:{type:'integer',minimum:1,maximum:12000}}) }] : []),
     ...(access === 'bounded_write' ? [{ name: 'mkdir_workspace', description: 'Create a workspace directory within this node\'s exact write scope before writing new files.', inputSchema: schema({ path: string }) }] : []),
     ...(pinned.size ? [{ name: 'read_workflow_resource', description: 'Read a small immutable resource pinned to this node. Large results may exceed the model transport; use read_workflow_resource_chunk for complete sequential reading.', inputSchema: schema({ path: { type: 'string', enum: [...pinned.keys()] } }) },
       {name:'read_workflow_resource_chunk',description:'Read a transport-safe UTF-8 byte chunk from an immutable pinned resource. Begin at start_byte 0, use max_bytes at most 12000, then follow next_byte exactly until complete is true.',inputSchema:schema({path:{type:'string',enum:[...pinned.keys()]},start_byte:{type:'integer',minimum:0},max_bytes:{type:'integer',minimum:1,maximum:12000}})},
       {name:'read_workflow_resource_range',description:'Read 1–200 numbered lines of an immutable pinned UTF-8 resource. Reports total lines; partial content is not a full-file audit.',inputSchema:schema({path:{type:'string',enum:[...pinned.keys()]},start_line:{type:'integer',minimum:1},end_line:{type:'integer',minimum:1}})}] : []),
     ...(pinned.size && access === 'bounded_write' ? [{ name: 'materialize_workflow_resource', description: 'Atomically copy an exact pinned UTF-8 Workflow resource into a permitted workspace path without sending its contents through the model. Parent directory must exist; expected_sha256 is null for a new file.', inputSchema: schema({ path: { type: 'string', enum: [...pinned.keys()] }, destination: string, expected_sha256: { type: ['string', 'null'] } }) }] : []),
   ];
-  let queue = Promise.resolve(); let revoked = false; const executionAbort=new AbortController();let executionHandle=null;
-  async function checkAuthority() {
+  let queue = Promise.resolve(); let revoked = false,programFailure=null; const executionAbort=new AbortController();let executionHandle=null;
+  const brokerId=randomUUID(), outputs=new Map(), outputReads=new Set(), sessions=new Map();let preparingCommandState=null,spoolOwner=null,tempOwner=null;
+  async function commandState() {
+    if(!preparingCommandState)preparingCommandState=(async()=>{
+      if(programOutputDirectory){await ensureDirectory(programOutputDirectory);await checkAuthority();}
+      spoolOwner=await prepareCommandTemp({workspace:root,brokerId,base:programOutputDirectory??commandTempBase,prefix:'pi-program-output-'});
+      await checkAuthority();
+      if(execution.kind==='native')tempOwner=await prepareCommandTemp({workspace:root,spool:spoolOwner.path,brokerId,base:commandTempBase});
+      await onOperation({tool:'run_task_program',phase:'temp_prepared',broker_id:brokerId,spool:spoolOwner.summary,...(tempOwner?{runtime_temp:tempOwner.summary}:{})});
+    })();
+    await preparingCommandState;await checkAuthority();await spoolOwner.assertOwned();if(tempOwner)await tempOwner.assertOwned();await checkAuthority();
+  }
+  async function checkAuthority({allowProgramFailure=false}={}) {
     requireValue(!revoked, 'PI_BROKER_REVOKED', 'Workspace broker was revoked');
+    if(programFailure&&!allowProgramFailure)throw programFailure;
     await authorize(); requireValue(!revoked, 'PI_BROKER_REVOKED', 'Workspace broker was revoked during authorization');
+    if(programFailure&&!allowProgramFailure)throw programFailure;
+  }
+  function validateYield(args, initial) {
+    const milliseconds=args.yield_time_ms??(initial?10000:args.chars?250:5000);
+    requireValue(Number.isInteger(milliseconds) && (initial ? milliseconds===0 || milliseconds>=10000 && milliseconds<=30000 : milliseconds>=0 && milliseconds<=30000), 'PI_EXECUTION_ARGUMENTS', 'Program yield_time_ms is outside its bounded contract');
+    requireValue(args.max_output_tokens===undefined || Number.isInteger(args.max_output_tokens) && args.max_output_tokens>=1 && args.max_output_tokens<=200000, 'PI_EXECUTION_ARGUMENTS', 'max_output_tokens is outside its compatibility range');
+    return milliseconds;
+  }
+  async function prepareProgram(args,name) {
+    requireValue(!executionHandle || executionHandle.isQuiescent(), 'PI_EXECUTION_BUSY', 'Only one exact task program may own this broker');
+    requireValue(![...sessions.values()].some(session=>!session.settled), 'PI_EXECUTION_BUSY', 'A program session still owns this broker');
+    requireValue(Array.isArray(args.args) && args.args.length <= 256 && args.args.every(value => typeof value === 'string'
+      && value.length <= 8192 && !value.includes('\0')), 'PI_EXECUTION_ARGUMENTS', 'Task program arguments must be bounded strings');
+    if (execution.kind === 'native') {
+      if (prepareRuntimeEnvironment) {
+        const prepared = await prepareRuntimeEnvironment();
+        execution = withDeadline(nativeExecutionBinding(prepared.environment ?? prepared));
+      } else {
+        await verifyRuntimeEnvironment(runtimeEnvironment.requirements ?? {executables:runtimeEnvironment.tools.map(tool=>tool.name)},runtimeEnvironment);
+      }
+      await checkAuthority();
+    }
+    if (name === 'run_workspace_program') {
+      requireValue(typeof args.program === 'string' && args.program.length > 0 && args.program.length <= 32768 && !args.program.includes('\0'), 'PI_EXECUTION_ARGUMENTS', 'Program must identify a discovered executable');
+      const alias = Object.hasOwn(execution.programs,args.program) ? args.program
+        : Object.keys(execution.programs).find(alias=>execution.programs[alias]===args.program);
+      requireValue(alias !== undefined, 'PI_EXECUTION_ARGUMENTS', 'Program is not an exact discovered Host executable or alias');
+      requireValue(args.stdin === undefined || typeof args.stdin === 'string' && Buffer.byteLength(args.stdin,'utf8') <= 1024*1024, 'PI_EXECUTION_ARGUMENTS', 'Program stdin must be at most 1 MiB of UTF-8');
+      requireValue(args.workdir === undefined || typeof args.workdir === 'string' && args.workdir.length > 0 && !args.workdir.includes('\0'), 'PI_EXECUTION_ARGUMENTS', 'Program workdir must be inside the node workspace');
+      const workdir = resolve(root,args.workdir??'.');
+      requireValue(within(root,workdir), 'PI_EXECUTION_ARGUMENTS', 'Program workdir leaves the node workspace');
+      await directory(workdir);
+      return {program:alias,args:args.args,cwd:'workspace',literal:true,stdin:args.stdin??'',workdir};
+    }
+    requireValue(Object.hasOwn(execution.programs,args.program) && ['workspace','task_root'].includes(args.cwd) && (args.cwd!=='task_root'||inputs.has('task_root')), 'PI_EXECUTION_ARGUMENTS', 'Task program must match the discovered Host binding and declared cwd');
+    return args;
+  }
+  async function runProgram(args,callId,name,session=null) {
+    const started = Date.now(); const argvEvidence = { args_sha256: digest(JSON.stringify(args.args)), arg_count: args.args.length,
+      ...(session?{process_id:session.id,executable:execution.programs[args.program],workdir:args.workdir,stdin_sha256:digest(Buffer.from(args.stdin,'utf8')),stdin_bytes:Buffer.byteLength(args.stdin,'utf8')}:{}) };
+    let capture=null,launchedHandle=null;
+    try{
+      await onOperation({ call_id: callId, tool: name, program: args.program, cwd: args.cwd, ...argvEvidence, command_timeout_ms: execution.command_timeout_ms, phase: 'started' });
+      if (execution.kind === 'wsl') for(const boundary of boundaries)await requireWritableTreeWithoutLinks(boundary);
+      const masks=execution.kind === 'wsl' ? await sandboxMasks([root,inputs.get('task_root')],denied) : [];
+      await commandState();
+      capture=createProgramOutput(spoolOwner);outputs.set(capture.outputId,capture);
+      if(session)session.capture=capture;
+      requireValue(!executionHandle || executionHandle.isQuiescent(), 'PI_EXECUTION_BUSY', 'Only one exact task program may own this broker');
+      const options={signal:executionAbort.signal,outputSink:session?{write(stream,chunk){capture.write(stream,chunk);session.pendingText+=session.decoders[stream].write(chunk);}}:capture,onHandle:handle=>{requireValue(!executionHandle||executionHandle.isQuiescent(),'PI_EXECUTION_BUSY','Only one exact bound execution may own this broker');executionHandle=handle;launchedHandle=handle;if(session){session.handle=handle;session.onLaunched?.();}}};
+      const roots={workspace:root,task_root:inputs.get('task_root')};
+      let result;
+      try{result=execution.kind === 'wsl'
+        ? await executeBoundProgram(execution,args,roots,{...options,masks,writable:boundaries,beforeSpawn:checkAuthority})
+        : await (async()=>{await tempOwner.assertOwned();await spoolOwner.assertOwned();await checkAuthority();return executeNativeProgram(execution,args,roots,{...options,env:{...augmentedRuntimeEnvironment(programEnvironment??process.env,{tools:Object.entries(execution.programs).map(([name,path])=>({name,path,status:'found'}))},{workspace:root}),TEMP:tempOwner.path,TMP:tempOwner.path,TMPDIR:tempOwner.path}});})();}
+      catch(error){if(session?.stopRequested && error.code==='PI_EXECUTION_CANCELLED' && launchedHandle?.isQuiescent())result={exit_code:130,signal:'SIGINT'};else throw error;}
+      capture.finish({call_id:callId,program:args.program,...argvEvidence,exit_code:result.exit_code,signal:result.signal});
+      await onOperation({ call_id: callId, tool: name, program: args.program, cwd: args.cwd, ...argvEvidence,
+        phase: 'completed', exit_code: result.exit_code, signal: result.signal, duration_ms: Date.now() - started, output_ref:capture.reference(), output_evidence:capture.evidence() });
+      return session ? {...result,output_ref:capture.reference()} : textResult(programOutputMode==='actual'?await capture.actual(result):await capture.carrier(result));
+    }catch(error){
+      if(capture&&(!launchedHandle||launchedHandle.isQuiescent())){
+        try{capture.finish({call_id:callId,program:args.program,...argvEvidence,error_code:error.code??'PI_EXECUTION_FAILED'});}
+        catch(sealingError){if(sealingError!==error)error=Object.assign(new AggregateError([error,sealingError],'Program failure and output sealing both failed'),{code:sealingError.code??'PI_PROGRAM_OUTPUT_SEAL',retained_at:sealingError.retained_at});}
+        error.program_output=capture.reference();
+      }
+      // Zero-yield sessions settle outside the tool queue. Retain the failure
+      // before awaiting its durable observation so no new effect can pass it.
+      if(session)programFailure??=error;
+      await onOperation({call_id:callId,tool:name,...(session?{process_id:session.id}:{}),phase:'failed',quiescent:!launchedHandle||launchedHandle.isQuiescent(),code:error.code??'PI_EXECUTION_FAILED',diagnostic:safeDiagnostic(error),
+        ...(error.details?{execution_diagnostic:{pid:error.details.pid??null,process_group:error.details.process_group??null,cause_code:error.details.cause_code??null,
+          helper_exit_code:error.details.helper_exit_code??null,helper_cause_code:error.details.helper_cause_code??null,helper_duration_ms:error.details.helper_duration_ms??null,
+          helper_timeout_ms:error.details.helper_timeout_ms??null,helper_killed:error.details.helper_killed??null,
+          helper_stdout:safeDiagnostic({message:error.details.helper_stdout??''}),helper_stderr:safeDiagnostic({message:error.details.helper_stderr??''}),
+          parent_exited:error.details.parent_exited??null,parent_closed:error.details.parent_closed??null}}:{}),
+        ...(error.program_output?{output_ref:error.program_output}:{})});
+      throw error;
+    }finally{if(launchedHandle?.isQuiescent()&&executionHandle===launchedHandle)executionHandle=null;}
+  }
+  async function awaitProgram(session,milliseconds) {
+    if(!session.settled && milliseconds>0){
+      let timer;
+      try{await Promise.race([session.completion,new Promise(resolve=>{timer=setTimeout(resolve,milliseconds);})]);}
+      finally{clearTimeout(timer);}
+    }
+    if(session.error)throw session.error;
+    let end=Math.min(session.pendingText.length,12000);
+    const envelope=text=>({status:session.settled?'completed':'running',exit_code:session.settled?session.result.exit_code:null,
+      output:text,has_more:!session.settled||text.length<session.pendingText.length,
+      ...(!session.settled||text.length<session.pendingText.length?{session_id:session.id}:{}),
+      ...(session.settled?{signal:session.result.signal,output_ref:session.result.output_ref}:{})});
+    if(end>0 && /^[\uDC00-\uDFFF]$/.test(session.pendingText[end]??'') && /^[\uD800-\uDBFF]$/.test(session.pendingText[end-1]))end--;
+    while(Buffer.byteLength(JSON.stringify(textResult(envelope(session.pendingText.slice(0,end)))))>32768){
+      end=Math.floor(end/2);
+      if(end>0 && /^[\uDC00-\uDFFF]$/.test(session.pendingText[end]??'') && /^[\uD800-\uDBFF]$/.test(session.pendingText[end-1]))end--;
+      requireValue(end>0,'PI_PROGRAM_REPLY_SIZE','Program session metadata exceeds the transport budget');
+    }
+    const result=envelope(session.pendingText.slice(0,end));session.pendingText=session.pendingText.slice(end);
+    if(!result.has_more)session.exhausted=true;
+    return textResult(result);
   }
   async function perform(name, args, callId) {
     requireValue(tools.some(tool => tool.name === name) && typeof callId === 'string' && callId.length <= 256, 'PI_TOOL_DENIED', 'Tool is outside this node broker');
-    await checkAuthority();
-    argsShape(args, name === 'write_workspace' ? ['path', 'text', 'expected_sha256'] : name === 'materialize_workflow_resource' ? ['path', 'destination', 'expected_sha256'] : name === 'run_task_program' ? ['program', 'args', 'cwd'] : name==='read_workflow_resource_range'?['path','start_line','end_line']:name==='read_workflow_resource_chunk'?['path','start_byte','max_bytes']:['list_input','read_input'].includes(name)?['root','path']:['path']);
-    if (name === 'run_task_program') {
-      requireValue(Array.isArray(args.args) && args.args.length <= 256 && args.args.every(value => typeof value === 'string'
-        && value.length <= 8192 && !value.includes('\0')), 'PI_EXECUTION_ARGUMENTS', 'Task program arguments must be bounded strings');
-      if (execution.kind === 'native') {
-        if (prepareRuntimeEnvironment) {
-          const prepared = await prepareRuntimeEnvironment();
-          execution = nativeExecutionBinding(prepared.environment ?? prepared);
-        } else {
-          await verifyRuntimeEnvironment(runtimeEnvironment.requirements ?? {executables:runtimeEnvironment.tools.map(tool=>tool.name)},runtimeEnvironment);
-        }
-        await checkAuthority();
+    await checkAuthority({allowProgramFailure:name==='read_program_output'||name==='continue_workspace_command'});
+    if(name==='run_workspace_program')argsShape(args,['program','args','stdin','workdir','yield_time_ms','max_output_tokens'],['program','args']);
+    else if(name==='continue_workspace_command')argsShape(args,['session_id','chars','yield_time_ms','max_output_tokens'],['session_id']);
+    else argsShape(args, name === 'write_workspace' ? ['path', 'text', 'expected_sha256'] : name === 'materialize_workflow_resource' ? ['path', 'destination', 'expected_sha256'] : name === 'run_task_program' ? ['program', 'args', 'cwd'] : name === 'read_program_output' ? ['output_id','stream','start_byte','max_bytes'] : name==='read_workflow_resource_range'?['path','start_line','end_line']:name==='read_workflow_resource_chunk'?['path','start_byte','max_bytes']:['list_input','read_input'].includes(name)?['root','path']:['path']);
+    if(name==='read_program_output'){
+      const capture=outputs.get(args.output_id);requireValue(capture,'PI_PROGRAM_OUTPUT_DENIED','Program output belongs to another broker or attempt');
+      const result=await capture.chunk(args.stream,args.start_byte,args.max_bytes);
+      await checkAuthority({allowProgramFailure:true});
+      await onOperation({call_id:callId,tool:name,phase:'read',broker_id:brokerId,output_id:args.output_id,stream:args.stream,start_byte:args.start_byte,next_byte:result.next_byte,total_bytes:result.total_bytes,sha256:result.sha256});
+      return programTextResult(result);
+    }
+    if(name==='continue_workspace_command'){
+      const milliseconds=validateYield(args,false),session=sessions.get(args.session_id);
+      requireValue(session && !session.exhausted,'PI_EXECUTION_SESSION','Unknown or exhausted program session');
+      requireValue(args.chars===undefined || args.chars==='' || args.chars==='\u0003','PI_EXECUTION_ARGUMENTS','Program stdin was already closed after its exact initial input');
+      await onOperation({call_id:callId,tool:name,phase:'continued',process_id:session.id,args_sha256:digest(JSON.stringify(args))});
+      if(args.chars==='\u0003'&&!session.settled){
+        session.stopRequested=true;
+        // Launch preparation can still be in flight after a zero-yield start.
+        await session.launched;
+        if(!session.settled)await session.handle.stop(executionError('PI_EXECUTION_CANCELLED','Owned program session was interrupted'));
       }
-      const started = Date.now(); const argvEvidence = { args_sha256: digest(JSON.stringify(args.args)), arg_count: args.args.length };
-      await onOperation({ call_id: callId, tool: name, program: args.program, cwd: args.cwd, ...argvEvidence, phase: 'started' });
-      if (execution.kind === 'wsl') for(const boundary of boundaries)await requireWritableTreeWithoutLinks(boundary);
-      const masks=execution.kind === 'wsl' ? await sandboxMasks([root,inputs.get('task_root')],denied) : [];
-      let launchedHandle=null;
-      try{
-        requireValue(!executionHandle || executionHandle.isQuiescent(), 'PI_EXECUTION_BUSY', 'Only one exact task program may own this broker');
-        const options={signal:executionAbort.signal,onHandle:handle=>{requireValue(!executionHandle||executionHandle.isQuiescent(),'PI_EXECUTION_BUSY','Only one exact bound execution may own this broker');executionHandle=handle;launchedHandle=handle;}};
-        const roots={workspace:root,task_root:inputs.get('task_root')};
-        const result=execution.kind === 'wsl'
-          ? await executeBoundProgram(execution,args,roots,{...options,masks,writable:boundaries,beforeSpawn:checkAuthority})
-          : await (async()=>{await checkAuthority();return executeNativeProgram(execution,args,roots,{...options,env:{...process.env,PATH:[...new Set(Object.values(execution.programs).map(dirname)),process.env.PATH ?? ''].join(delimiter)}});})();
-        await onOperation({ call_id: callId, tool: name, program: args.program, cwd: args.cwd, ...argvEvidence,
-          phase: 'completed', exit_code: result.exit_code, signal: result.signal, duration_ms: Date.now() - started });
-        return textResult(result);
-      }finally{if(launchedHandle?.isQuiescent()&&executionHandle===launchedHandle)executionHandle=null;}
+      return awaitProgram(session,milliseconds);
+    }
+    if(name==='run_task_program'||name==='run_workspace_program'){
+      const milliseconds=name==='run_workspace_program'?validateYield(args,true):null;
+      const request=await prepareProgram(args,name);
+      if(name==='run_task_program')return runProgram(request,callId,name);
+      const session={id:randomUUID(),pendingText:'',decoders:{stdout:new StringDecoder('utf8'),stderr:new StringDecoder('utf8')},settled:false,exhausted:false,stopRequested:false};
+      sessions.set(session.id,session);
+      let resolveLaunched;
+      session.launched=new Promise(resolve=>{resolveLaunched=resolve;});
+      session.completion=runProgram(request,callId,name,session).then(result=>{session.result=result;},error=>{session.error=error;programFailure??=error;throw error;}).finally(()=>{
+        session.pendingText+=session.decoders.stdout.end()+session.decoders.stderr.end();session.settled=true;resolveLaunched();
+      });
+      // A background rejection remains owned and is reported on continuation
+      // and quiesce; observing it here prevents an unhandled rejection.
+      void session.completion.catch(()=>{});
+      session.onLaunched=resolveLaunched;
+      return awaitProgram(session,milliseconds);
     }
     if(name==='read_workflow_resource_range') {
       const item=pinned.get(args.path);requireValue(item,'PI_RESOURCE_DENIED','Resource is outside the pinned node manifest');
@@ -598,7 +781,8 @@ export async function createPiToolBroker({ workspace, access, allowedPaths = [],
   }
   const revoke=()=>{revoked=true;if(!executionAbort.signal.aborted)executionAbort.abort(executionError('PI_EXECUTION_CANCELLED','Bound execution authority was revoked'));};
   return { tools: () => structuredClone(tools), revoke,
-    isQuiescent(){return !executionHandle||executionHandle.isQuiescent();},
+    programOutputEvidence:()=>({broker_id:brokerId,retained:retainProgramOutput,spool_owner:spoolOwner?.summary??null,outputs:[...outputs.values()].map(capture=>capture.evidence())}),
+    isQuiescent(){return (!executionHandle||executionHandle.isQuiescent()) && ![...sessions.values()].some(session=>!session.settled);},
     async quiesce() {
       revoke();
       // Retry the exact Linux stop before waiting on the tool queue. A failed
@@ -606,28 +790,48 @@ export async function createPiToolBroker({ workspace, access, allowedPaths = [],
       let queueError=null,stopError=null;
       if(executionHandle&&!executionHandle.isQuiescent())try{await executionHandle.stop(executionAbort.signal.reason);}catch(error){stopError=error;}
       if(!stopError)try{await queue;}catch(error){queueError=error;}
+      const sessionErrors=(await Promise.allSettled([...sessions.values()].filter(session=>!stopError||session.settled).map(session=>session.completion))).filter(result=>result.status==='rejected').map(result=>result.reason);
       const quiescent=!executionHandle||executionHandle.isQuiescent();if(quiescent)executionHandle=null;
-      const error=queueError&&stopError?new AggregateError([queueError,stopError],'Bound execution and quiescence both failed'):stopError??queueError;
+      const errors=[...new Set([queueError,stopError,programFailure,...sessionErrors].filter(Boolean))];
+      if(preparingCommandState)try{await preparingCommandState;}catch(error){if(!errors.includes(error))errors.push(error);}
+      for(const result of await Promise.allSettled([...outputReads]))if(result.status==='rejected'&&!errors.includes(result.reason))errors.push(result.reason);
+      if(quiescent){
+        for(const capture of outputs.values())try{capture.finish();}catch(error){errors.push(error);}
+        const outputRetentionError=[...outputs.values()].map(capture=>capture.retentionError()).find(Boolean);
+        if(outputRetentionError&&!errors.includes(outputRetentionError)){errors.push(outputRetentionError);await onOperation({tool:'run_task_program',phase:'output_retained',broker_id:brokerId,retained_at:spoolOwner?.path,code:outputRetentionError.code,diagnostic:safeDiagnostic(outputRetentionError)});}
+        for(const owner of [tempOwner,...(retainProgramOutput||outputRetentionError?[]:[spoolOwner])])if(owner)try{await owner.close();}catch(error){errors.push(error);await onOperation({tool:'run_task_program',phase:'temp_retained',broker_id:brokerId,retained_at:error.retained_at??owner.path,code:error.code??'PI_COMMAND_TEMP_CLEANUP',diagnostic:safeDiagnostic(error)});}
+        if(retainProgramOutput&&spoolOwner)try{await spoolOwner.assertOwned();}catch(error){errors.push(error);await onOperation({tool:'run_task_program',phase:'output_retained',broker_id:brokerId,retained_at:spoolOwner.path,code:error.code,diagnostic:safeDiagnostic(error)});}
+      }
+      const error=errors.length>1?new AggregateError(errors,'Program execution or owned-state cleanup failed'):errors[0]??null;
       return {quiescent,error};
     },
     call(name, args, callId) {
-    const next = queue.then(async () => {
+    const invoke = async () => {
       try { return await perform(name, args, callId); }
       catch (error) {
-        if (name==='run_task_program' && ['ENVIRONMENT_BINDING_STALE','ENVIRONMENT_SETUP_REQUIRED','PI_EXECUTION_LAUNCH'].includes(error.code)) {
+        if (['run_task_program','run_workspace_program'].includes(name) && ['ENVIRONMENT_BINDING_STALE','ENVIRONMENT_SETUP_REQUIRED','PI_EXECUTION_LAUNCH'].includes(error.code)) {
           await onOperation({call_id:callId,tool:name,program:String(args?.program??'').slice(0,100),phase:'rejected',code:error.code,diagnostic:safeDiagnostic(error)});
         }
-        const stoppedOutputLimit = name==='run_task_program' && error?.code==='PI_EXECUTION_OUTPUT'
+        const stoppedOutputLimit = ['run_task_program','run_workspace_program','continue_workspace_command'].includes(name) && error?.code==='PI_EXECUTION_OUTPUT'
           && (!executionHandle || executionHandle.isQuiescent());
-        if (!recoverToolErrors || error?.committed || (!RECOVERABLE_TOOL_ERRORS.has(error?.code) && !stoppedOutputLimit)) throw error;
-        if(stoppedOutputLimit) error.message += '; command stopped. Output is unavailable and effects may be partial. Inspect effects and use a narrower query; do not blindly repeat the command.';
+        const literalArguments = ['run_workspace_program','continue_workspace_command'].includes(name)
+          && ['PI_EXECUTION_ARGUMENTS','PI_EXECUTION_SESSION','PI_EXECUTION_BUSY'].includes(error?.code);
+        if (!recoverToolErrors || error?.committed || (!RECOVERABLE_TOOL_ERRORS.has(error?.code) && !stoppedOutputLimit && !literalArguments)) throw error;
+        if(stoppedOutputLimit) error.message += '; command stopped. Captured output remains available through read_program_output and effects may be partial. Inspect effects and use a narrower query; do not blindly repeat the command.';
         const diagnostic = safeDiagnostic(error);
         const path = typeof args?.path === 'string' ? args.path.slice(0, 1000) : '';
         await onOperation({ call_id: callId, tool: name, ...(typeof args?.root === 'string' ? { root: args.root.slice(0, 1000) } : {}), path, phase: 'rejected', code: error.code, diagnostic });
+        if(stoppedOutputLimit&&error.program_output)return {success:false,contentItems:[{type:'inputText',text:JSON.stringify({error:{code:error.code,message:diagnostic},output_ref:error.program_output})}]};
         return errorResult(error.code, diagnostic);
       }
-    });
+    };
+    // Output evidence may still be read after a failed command. Preserve the
+    // poisoned command queue and its error; this does not recover execution.
+    const next = name==='read_program_output'?queue.then(invoke,invoke):queue.then(invoke);
+    if(name==='read_program_output'){
+      outputReads.add(next);void next.then(()=>outputReads.delete(next),()=>outputReads.delete(next));
+    }
     // A failed operation poisons this broker. No subsequent tool may hide it.
-    queue = next; return next;
+    if(name!=='read_program_output')queue = next; return next;
   } };
 }

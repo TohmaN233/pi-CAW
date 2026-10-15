@@ -53,10 +53,11 @@ test('the initiating Agent selects a node mode, with invalid requests rejected b
   const f=await fixture(t), g=workflow([]);await f.service.call('create_workflow',{workflow:g});
   await assert.rejects(f.service.call('run',{workflow_id:g.id,workspace:f.workspace,inputs:{task:'bad'},main_modes:{missing:'worker'}}),{code:'MAIN_EXECUTION_NODE'});
   assert.equal((await f.service.call('runs')).length,0);
-  await assert.rejects(f.service.call('run',{workflow_id:g.id,workspace:f.root,inputs:{task:'bad workspace'},main_modes:{final:'orchestration'}}),{code:'PI_MAIN_WORKSPACE'});
+  await assert.rejects(f.service.call('run',{workflow_id:g.id,workspace:f.root,inputs:{task:'bad mode'},main_modes:{final:'unknown'}}),{code:'MAIN_EXECUTION_MODE'});
   assert.equal((await f.service.call('runs')).length,0);
-  const run=await f.service.call('run',{workflow_id:g.id,workspace:f.workspace,access:'read_only',inputs:{task:'Context matters'},main_modes:{final:'orchestration'}});
+  const run=await f.service.call('run',{workflow_id:g.id,workspace:f.root,access:'read_only',inputs:{task:'Context matters'},main_modes:{final:'orchestration'}});
   await settle(f.service,run.run_id);assert.equal(f.mainRequests[0].main_mode,'orchestration');
+  assert.equal(f.mainRequests[0].workspace,f.root);
 });
 
 test('native orchestration audits shell/helper changes without widening its write grant', async t => {
