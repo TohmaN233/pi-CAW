@@ -1,3 +1,4 @@
+import { RUN_EVENT_MAX_BYTES } from './workflow-events.mjs';
 import { providersForWorkflow } from './workflow-provider-bindings.mjs';
 import {discoverRuntimeEnvironment, verifyRuntimeEnvironment} from './runtime-environment.mjs';
 import {normalizeExecutableRequirements} from './runtime-requirements.mjs';
@@ -98,7 +99,7 @@ function completionPayload(payload) {
   requireValue(payload && payload.status === 'succeeded' && typeof payload.summary === 'string' && payload.summary.length <= 20000, 'COMPLETION_SCHEMA', 'Completion needs succeeded status and a bounded summary');
   for (const key of ['artifacts', 'evidence', 'changed_paths', 'outside_paths']) requireValue(Array.isArray(payload[key]), 'COMPLETION_SCHEMA', `Completion requires ${key}`);
   requireValue(Object.hasOwn(payload, 'structured_output') && payload.evidence.length, 'COMPLETION_EVIDENCE', 'Completion needs structured output and verification evidence');
-  requireValue(Buffer.byteLength(canonicalJSON(payload)) <= 256 * 1024, 'COMPLETION_LIMIT', 'Completion output is too large; store artifacts separately');
+  requireValue(Buffer.byteLength(canonicalJSON(payload)) <= RUN_EVENT_MAX_BYTES, 'COMPLETION_LIMIT', 'Completion output is too large; store artifacts separately');
   return JSON.parse(canonicalJSON(payload));
 }
 export function resolvedSubagentPlan(definition,state){
@@ -113,9 +114,9 @@ export function resolvedSubagentPlan(definition,state){
 }
 
 export class WorkflowRuntime {
-  constructor({ workflowStore, runRoot, generationPolicy = null, authoringReviewer = null, context = {}, beforeStart = async () => {}, strictCapability = () => false, parallelWriteCapability = () => false, parallelManager, executionAdmission = null, environmentResolver = discoverRuntimeEnvironment, environmentVerifier = verifyRuntimeEnvironment, supportedNodeTypes = ['agent', 'skill_ref', 'tool', 'human_gate', 'subworkflow'] }) {
+  constructor({ workflowStore, runRoot, generationPolicy = null, authoringReviewer = null, context = {}, beforeStart = async () => {}, strictCapability = () => false, parallelWriteCapability = () => false, parallelManager, executionAdmission = null, environmentResolver = discoverRuntimeEnvironment, environmentVerifier = verifyRuntimeEnvironment, supportedNodeTypes = ['agent', 'skill_ref', 'tool', 'human_gate', 'subworkflow'], runJournalDurability = 'durable' }) {
     this.generationPolicy = generationPolicy; this.authoringReviewer = authoringReviewer; this.environmentResolver = environmentResolver; this.environmentVerifier = environmentVerifier;
-    this.workflows = workflowStore; this.runs = new WorkflowRunStore(runRoot); this.context = context;
+    this.workflows = workflowStore; this.runs = new WorkflowRunStore(runRoot, { journalDurability: runJournalDurability }); this.context = context;
     this.beforeStart = beforeStart; this.strictCapability = strictCapability; this.parallelWriteCapability = parallelWriteCapability;
     this.parallelManager = parallelManager; this.executionAdmission = executionAdmission;
     this.supportedNodeTypes = new Set(supportedNodeTypes);
@@ -335,7 +336,7 @@ export class WorkflowRuntime {
   async recordExecutorEvent(runId, { node_id, attempt_id, lease_token, control_token, event }) {
     const fields = {
       pi_event: ['method', 'thread_id', 'turn_id', 'item_type', 'status', 'error_code', 'diagnostic', 'usage_available', 'input_tokens', 'cached_input_tokens', 'cache_write_input_tokens', 'output_tokens', 'reasoning_output_tokens'],
-      tool_operation: ['call_id', 'tool', 'root', 'path', 'phase', 'execution_session_id', 'sha256', 'before_sha256', 'after_sha256', 'source_sha256', 'entries', 'start_line', 'end_line', 'total_lines', 'start_byte', 'end_byte', 'total_bytes', 'complete', 'bytes', 'mime', 'code', 'diagnostic', 'program', 'cwd', 'args_sha256', 'arg_count', 'command_timeout_ms', 'exit_code', 'signal', 'duration_ms', 'broker_id','output_id','stream','next_byte','artifact','evidence_sha256','evidence_bytes'],
+      tool_operation: ['call_id', 'tool', 'root', 'path', 'phase', 'execution_session_id', 'message_id', 'sender_session_id', 'sha256', 'before_sha256', 'after_sha256', 'source_sha256', 'entries', 'start_line', 'end_line', 'total_lines', 'start_byte', 'end_byte', 'total_bytes', 'complete', 'bytes', 'mime', 'code', 'diagnostic', 'program', 'cwd', 'args_sha256', 'arg_count', 'command_timeout_ms', 'exit_code', 'signal', 'duration_ms', 'broker_id','output_id','stream','next_byte','artifact','evidence_sha256','evidence_bytes'],
       profile_owned: ['home', 'receipt_home', 'executable_sha256', 'pid'],
       session_state: ['status', 'code', 'diagnostic'],
       model_catalog: ['requested_model', 'requested_effort', 'inventory_count', 'match_count', 'effort_supported', 'model_ids'],

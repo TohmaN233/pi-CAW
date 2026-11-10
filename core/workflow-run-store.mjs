@@ -10,9 +10,11 @@ import { appendEvent, readEvents, VerifiedJournalReader, replayEvents, statePatc
 
 const runState = globalThis[Symbol.for('pi-caw.run-store.operations.v1')] ??= {
   scopes: new AsyncLocalStorage(), foreground: new AsyncLocalStorage(), activity: new Map(), listeners: new Map(),
+  localWriterTails: new Map(),
 };
+runState.localWriterTails ??= new Map();
 const operationKey = root => process.platform === 'win32' ? resolve(root).toLowerCase() : resolve(root);
-export const EXECUTOR_RESULT_MAX_BYTES = 256 * 1024;
+export const EXECUTOR_RESULT_MAX_BYTES = 32 * 1024 * 1024;
 async function journalStarted(directory) {
   try { await lstat(join(directory, 'events.jsonl')); return true; }
   catch (error) { if (error.code === 'ENOENT') return false; throw error; }
@@ -25,6 +27,27 @@ async function scopedOperation(root, kind, action) {
   const owner = { key, kind, active: true };
   try { return await runState.scopes.run([...ancestors, owner], action); }
   finally { owner.active = false; }
+}
+
+async function scopedLocalRunOperation(root, action) {
+  const key = operationKey(root), ancestors = runState.scopes.getStore() ?? [];
+  if (ancestors.some(owner => owner.active && owner.key === key)) return action();
+  requireValue(!ancestors.some(owner => owner.active && owner.kind === 'run'), 'RUN_STORE_LOCK_ORDER',
+    'A Run journal transaction cannot acquire a different Run writer');
+  const owner = { key, kind: 'run', active: true };
+  try { return await runState.scopes.run([...ancestors, owner], action); }
+  finally { owner.active = false; }
+}
+
+function withLocalRunWriter(root, action) {
+  const key = operationKey(root), ancestors = runState.scopes.getStore() ?? [];
+  if (ancestors.some(owner => owner.active && owner.key === key)) return Promise.resolve().then(action);
+  const previous = runState.localWriterTails.get(key) ?? Promise.resolve();
+  const operation = previous.then(() => scopedLocalRunOperation(root, action));
+  const tail = operation.then(() => undefined, () => undefined);
+  runState.localWriterTails.set(key, tail);
+  void tail.then(() => { if (runState.localWriterTails.get(key) === tail) runState.localWriterTails.delete(key); });
+  return operation;
 }
 
 // Store admission covers only a short filesystem census/create/maintenance
@@ -128,14 +151,15 @@ export async function withRunStoreForegroundActivity(root, action) {
 export class WorkflowRunStore {
   #journalReader = new VerifiedJournalReader();
   #activePins = new Map();
-  constructor(root) {
+  constructor(root, { journalDurability = 'durable' } = {}) {
     requireValue(isAbsolute(root), 'ABSOLUTE_PATH_REQUIRED', 'Run store root must be absolute');
-    this.root = resolve(root); this.writer = new WorkflowStore(this.root);
+    this.root = resolve(root); this.writer = new WorkflowStore(this.root); this.journalDurability = journalDurability;
   }
   async initialize() { await this.writer.initialize(); return this; }
   directory(id) { return join(this.root, `run-${workflowId(id)}.run`); }
   async withRunWriter(id, action) {
     const root = this.directory(id);
+    if (this.journalDurability === 'gameplay') return withLocalRunWriter(root, action);
     await noSymlinks(root); // Admission must never recreate a missing Run.
     const key = operationKey(await canonicalNoLinks(root));
     if ((runState.scopes.getStore() ?? []).some(owner => owner.active && owner.key === key)) return Promise.resolve().then(action);
@@ -224,7 +248,9 @@ export class WorkflowRunStore {
           try { await file.writeFile(bytes); await file.sync(); } finally { await file.close(); }
         }
         await writeDurableJSON(join(destination, 'pins.json'), pins);
-        const event = await appendEvent(join(destination, 'events.jsonl'), [], 'started', { state });
+        const event = await appendEvent(join(destination, 'events.jsonl'), [], 'started', { state }, {
+          sync: this.journalDurability !== 'gameplay',
+        });
         await syncDirectory(join(destination, 'objects')); await syncDirectory(destination); await syncDirectory(this.root);
         return { state: structuredClone(state), pins: structuredClone(pins), sequence: 1, events: [event] };
       } catch (error) {
@@ -310,7 +336,9 @@ export class WorkflowRunStore {
       requireValue(next.run_id === id && next.pins_hash === current.state.pins_hash, 'RUN_IDENTITY', 'A transition cannot change Run identity/pins');
       const patch = statePatch(current.state, next);
       if (Object.values(patch).every(values => !Object.keys(values).length)) return { ...current, result, idempotent: true };
-      const event = await appendEvent(join(root, 'events.jsonl'), current.events, kind, { patch });
+      const event = await appendEvent(join(root, 'events.jsonl'), current.events, kind, { patch }, {
+        sync: this.journalDurability !== 'gameplay' || kind === 'complete',
+      });
       return { state: next, pins: current.pins, sequence: event.sequence, result, events: [...current.events, event] };
     });
   }

@@ -4,7 +4,7 @@ English | [简体中文](README.zh-CN.md)
 
 [![MIT Licensed](https://img.shields.io/badge/license-MIT-brightgreen.svg?style=flat-square)](LICENSE)
 
-pi-CAW 0.6.0 turns repeatable multi-step work into reusable Workflows and journaled Runs for Pi. Its Workbench lets Pi users create, import, configure and execute workflows with declared inputs, resources and outputs, keeping reusable steps focused on the material they need.
+pi-CAW 0.7.0 turns repeatable multi-step work into reusable Workflows and journaled Runs for Pi. Its Workbench lets Pi users create, import, configure and execute workflows with declared inputs, resources and outputs, keeping reusable steps focused on the material they need.
 
 ## Requirements
 
@@ -48,15 +48,19 @@ In Pi, open the Workbench:
 - Supports semantic repair through declared Workflow loops and fan-out correction. Fresh-review loops use a finite `max_rounds`; an explicitly qualified, read-only current-chat Main review can use `max_rounds: null` and stop on acceptance. Fan-out workers correct unresolved items while accepted siblings are preserved, within the pinned worker-attempt budget.
 - Gives authoring its own default of up to three automatic semantic repairs before it waits for user-guided continuation. This authoring budget is separate from Workflow execution repair.
 - Corrects invalid current-chat Main submissions in the same chat within the pinned turn budget, retaining staged results and completed effects. Mechanical failures remain visible for diagnosis.
+- Lets an initiating agent send a bounded instruction to one exact active worker session. The worker receives it in the same turn, with its original result schema and access grant.
+- Allows trusted SDK Hosts to opt into ending a fresh task after a validated semantic result submission. The default continues to wait for the assistant stop; current-chat orchestration keeps its own completion protocol.
+- Provides an offline-capable local evaluator for bounded, paired Workflow trials. It records exact outcomes and can adopt a qualified result as a Draft after explicit human authorization.
+- Exposes `PiCawService.awaitCompletion(runId)` for embedded Hosts that need the exact local driver, journal and notification outcome; see [completion ownership](docs/COMPLETION.md).
 
 Optional external collection: [workflow-package](https://github.com/TohmaN233/workflow-package). Each imported Workflow still needs to pass pi-CAW's compatibility, binding and local-readiness checks; this link does not imply that every package runs unchanged in Pi.
 
 ## Documentation
 
 - [Portable Workflow contracts](docs/PORTABLE-WORKFLOWS.md) cover package import, local model bindings and launch readiness.
-- [Pi Host interface](docs/HOST.md), [SDK runtime bindings](docs/SDK-RUNTIME.md) and [execution materials](docs/EXECUTION-MATERIALS.md) describe integration and execution boundaries.
+- [Pi Host interface](docs/HOST.md), [SDK runtime bindings](docs/SDK-RUNTIME.md), [completion ownership](docs/COMPLETION.md), [Workflow evolution evaluation](docs/evolution-workflows.md) and [execution materials](docs/EXECUTION-MATERIALS.md) describe integration and execution boundaries.
 - [Run Inspector](docs/RUN-INSPECTOR.md) explains how to inspect execution records. Contributors can consult [Parity](docs/PARITY.md), [Authoring parity](docs/AUTHORING-PARITY.md) and [Migration](docs/MIGRATION.md) for compatibility and implementation evidence.
-- The [2026-10-03 Beamer case study](docs/CASE-STUDY-BEAMER.md) records one historical workload and user feedback. It is not a 0.6.0 benchmark or a general savings estimate.
+- The [2026-10-03 Beamer case study](docs/CASE-STUDY-BEAMER.md) records one historical workload and user feedback. It is not a 0.7.0 benchmark or a general savings estimate.
 
 ## Development
 

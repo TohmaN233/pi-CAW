@@ -4,7 +4,7 @@
 
 [![MIT Licensed](https://img.shields.io/badge/license-MIT-brightgreen.svg?style=flat-square)](LICENSE)
 
-pi-CAW 0.6.0 将可重复的多步骤工作整理为 Pi 中可复用的 Workflow 和带日志的 Run。Workbench 让 Pi 用户创建、导入、配置并执行工作流，为步骤声明输入、资源和输出，使可复用的执行步骤聚焦于所需材料。
+pi-CAW 0.7.0 将可重复的多步骤工作整理为 Pi 中可复用的 Workflow 和带日志的 Run。Workbench 让 Pi 用户创建、导入、配置并执行工作流，为步骤声明输入、资源和输出，使可复用的执行步骤聚焦于所需材料。
 
 ## 需求
 
@@ -48,15 +48,19 @@ Main 没有独立模型绑定，会继承发起聊天的模型和 thinking level
 - 执行期间可通过工作流中声明的循环和 fan-out 校正进行语义返修。使用新会话独立审阅的循环设置有限的 `max_rounds`；明确限定、只读的当前聊天 Main 审阅可设为 `max_rounds: null`，并以接受作为停止条件。Fan-out worker 只校正尚未解决的条目，并在固定的 worker 尝试预算内保留已接受的同批条目。
 - Authoring 有独立默认值：最多进行三次自动语义返修，之后等待用户引导继续。该预算与 Workflow 执行返修分开。
 - 当前聊天 Main 的提交不合法时，会在固定轮次预算内于同一聊天中纠正，保留已暂存的结果与已完成的操作。底层执行故障保留错误，供后续诊断。
+- 发起 Agent 可以向一个准确的活动 worker session 发送有界补充指令。Worker 在原任务中接收消息，并沿用原结果 schema 和访问范围。
+- 可信 SDK Host 可选择在语义结果通过验证并提交后结束新的任务。默认仍等待 assistant stop；当前聊天 orchestration 继续使用自己的完成协议。
+- 提供可离线运行的本地评估器，用实际 Pi 执行有界、成对的 Workflow 试验。评估器记录准确结果，并可在人工明确授权后将合格候选保存为 Draft。
+- 内嵌 Host 可通过 `PiCawService.awaitCompletion(runId)` 等待准确 driver、journal 和通知结果，详见[完成生命周期](docs/COMPLETION.md)。
 
 可选外部集合：[workflow-package](https://github.com/TohmaN233/workflow-package)。导入的每个 Workflow 仍须通过 pi-CAW 的兼容性、绑定和本地就绪检查；此链接不代表集合中的所有包都能在 Pi 中原样运行。
 
 ## 文档
 
 - [可移植 Workflow 契约](docs/PORTABLE-WORKFLOWS.md)：package 导入、本地模型绑定和启动就绪状态。
-- [Pi Host 接口](docs/HOST.md)、[SDK 运行时绑定](docs/SDK-RUNTIME.md)和[执行材料](docs/EXECUTION-MATERIALS.md)：集成方式与执行边界。
+- [Pi Host 接口](docs/HOST.md)、[SDK 运行时绑定](docs/SDK-RUNTIME.md)、[完成生命周期](docs/COMPLETION.md)、[Workflow 演化评估](docs/evolution-workflows.md)和[执行材料](docs/EXECUTION-MATERIALS.md)：集成方式与执行边界。
 - [Run Inspector](docs/RUN-INSPECTOR.md)：查看执行记录。贡献者可参阅[功能对照](docs/PARITY.md)、[Authoring 对照](docs/AUTHORING-PARITY.md)和[迁移记录](docs/MIGRATION.md)中的兼容性与实现证据。
-- [2026-10-03 Beamer 使用案例](docs/CASE-STUDY-BEAMER.zh-CN.md)记录了一项历史任务和用户反馈。它不是 0.6.0 的基准测试，也不代表普遍的节省幅度。
+- [2026-10-03 Beamer 使用案例](docs/CASE-STUDY-BEAMER.zh-CN.md)记录了一项历史任务和用户反馈。它不是 0.7.0 的基准测试，也不代表普遍的节省幅度。
 
 ## 开发
 

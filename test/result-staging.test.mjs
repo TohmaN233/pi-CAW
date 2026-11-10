@@ -7,24 +7,24 @@ const schema = { type: 'object', required: ['result'], additionalProperties: fal
 const validate = async value => validateData(value, schema);
 const state = () => ({ submission: null, staged: null });
 
-test('missing submission metadata reports that no body was saved and permits a correct full submission', async () => {
+test('missing result metadata fails before a body is staged and permits a correct full submission', async () => {
   const current = state(), body = { result: { title: 'kept' } };
   await assert.rejects(acceptSemanticResult(current, { output: body }, validate), error =>
-    error.code === 'PI_RESULT_SUMMARY' && /No body is staged/.test(error.message) && /summary.*result/.test(error.message));
+    error.code === 'PI_RESULT_SUMMARY' && /Result requires a bounded summary/.test(error.message));
   await assert.rejects(acceptSemanticResult(current, { summary: 'ready', output: body }, validate), error =>
-    error.code === 'PI_RESULT_BODY' && /result.*not.*output/.test(error.message));
+    error.code === 'PI_RESULT_BODY' && /Submit result once, or a patch against the staged result/.test(error.message));
   await assert.rejects(acceptSemanticResult(current, { summary: 'ready', stage_id: 'invented', patch: [{op:'reset'}] }, validate), error =>
-    error.code === 'PI_RESULT_STAGE_MISSING' && /No body is staged/.test(error.message) && !/Do not.*resend/.test(error.message));
+    error.code === 'PI_RESULT_STAGE_MISSING' && /No matching staged result/.test(error.message) && /Do not invent or resend/.test(error.message));
   assert.equal(current.staged,null);
   await acceptSemanticResult(current,{summary:'ready',result:body},validate);
   assert.deepEqual(current.submission,{summary:'ready',result:body});
 });
 
-test('wrong stage identity reports the actual retained stage and preserves its body',async()=>{
+test('wrong stage identity leaves the actual retained stage and body unchanged',async()=>{
   const current=state();
   await assert.rejects(acceptSemanticResult(current,{summary:'draft',result:{draft:'retained'}},validate));
   const id=current.staged.id;
-  await assert.rejects(acceptSemanticResult(current,{summary:'fixed',stage_id:'invented',patch:[{op:'reset'}]},validate),error=>error.code==='PI_RESULT_STAGE_MISSING'&&error.message.includes(id));
+  await assert.rejects(acceptSemanticResult(current,{summary:'fixed',stage_id:'invented',patch:[{op:'reset'}]},validate),error=>error.code==='PI_RESULT_STAGE_MISSING'&&/No matching staged result/.test(error.message));
   assert.equal(current.staged.id,id);assert.equal(current.staged.result.draft,'retained');
 });
 
@@ -94,14 +94,25 @@ test('a missing required result wrapper is lifted by the host without another su
   assert.deepEqual(hostLiftRequiredWrapper(body, schema), { value: { result: body }, lifted: true, key: 'result' });
 });
 
-test('a patch cannot smuggle the body back as its value', async () => {
+test('legitimate long field corrections use the same durable result boundary as complete submissions', async () => {
   const current = state();
-  await assert.rejects(acceptSemanticResult(current, { summary: 'draft', result: { draft: { title: 'x'.repeat(5000) } } }, validate));
-  await assert.rejects(acceptSemanticResult(current, {
-    summary: 'too big', stage_id: current.staged.id,
-    patch: [{ op: 'set', path: '/note', value: 'y'.repeat(5000) }],
-  }, validate), error => error.code === 'PI_RESULT_PATCH');
-  assert.equal(current.submission, null);
+  await assert.rejects(acceptSemanticResult(current, { summary: 'draft', result: { result: { title: 'retained' }, extra: true } }, validate));
+  await acceptSemanticResult(current, {
+    summary: 'correct long field', stage_id: current.staged.id,
+    patch: [{ op: 'remove', path: '/extra' }, { op: 'set', path: '/result/title', value: '完整正文'.repeat(2000) }],
+  }, validate);
+  assert.equal(current.submission.result.result.title, '完整正文'.repeat(2000));
+});
+
+test('path inventory JSON pointers address slash and tilde property names', async () => {
+  const current = state();
+  await assert.rejects(acceptSemanticResult(current, { summary: 'draft', result: { result: { 'a/b~c': { note: 'retained' } }, extra: true } }, validate),
+    error => error.message.includes('$/result/a~1b~0c'));
+  await acceptSemanticResult(current, {
+    summary: 'correct escaped path', stage_id: current.staged.id,
+    patch: [{ op: 'remove', path: '/extra' }, { op: 'set', path: '$/result/a~1b~0c/note', value: 'corrected' }],
+  }, validate);
+  assert.equal(current.submission.result.result['a/b~c'].note, 'corrected');
 });
 
 test('nested array corrections preserve large staged siblings and reject nonexisting indices',async()=>{

@@ -37,6 +37,8 @@ Run workspace 与发起聊天的 cwd 是独立字段，不能因图中含有 orc
 
 `thread start` 创建持久 Pi session；续接必须验证原 Run、绑定、上游 session ID、session file 和实际 turn。文件可重开不等于上一执行器已经关闭。Host 不把缺少准确完成证据的 turn 当成成功，也不以新 session 代替不确定的旧任务。
 
+发起聊天的 Agent 可调用 `caw send_node_message`，以 `run_id/node_id/message` 向正在 streaming 的原 SDK worker 补充指令。多 worker 节点必须指定 dispatch receipt 中的 `session_id`；可选 `attempt_id` 校验具体尝试。消息最多 12000 UTF-8 bytes，由 public native `Agent.steer` 同步入队，在当前工具边界之后消费，避免 `AgentSession.steer` 异步 input/template hooks 带来的结束后入队竞态。支持本地、detached worker 和 reverse RPC 下的隔离 Main，不新建会话。返回消息 ID、会话 ID、hash 与排队/消费状态；Run 小型事件记录 `requested/queued/consumed/rejected`，正文留在精确证据产物与实际 session transcript。排队不等于已读；取消会拒绝未消费消息并清理本 task 队列。正式结果正在提交或已提交时拒绝补发；尚未消费的补充指令会阻止语义提交。原结果 schema、访问范围和返修预算保持有效。当前聊天 Main 使用原聊天，不需要额外节点消息入口。
+
 ## Programs 与文件边界
 
 Cooperative child 使用 Pi 原生 read/search 工具和 scope-checked write/edit；Main 的 `tool_call` gate 限制当前 packet 可用操作。二者共享 `scopedTaskBroker`，提供声明 workspace/input 读取、精确 pinned resource 读取、文件写入、资源 materialization、运行时依赖及程序执行。

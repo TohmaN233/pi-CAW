@@ -24,6 +24,8 @@ When pi-CAW is enabled, proactively use enabled, model-bound Roles for useful de
 3. Continue independent work while the Host runs. Use its notifications or `caw wait` when the next action depends on the result.
 4. On failure, inspect the exact Run/node and follow [recovery](references/recovery.md). Report completion after the Run is `succeeded`; approvals and final acceptance use the Workbench.
 
+To relay the user's correction or question to a running worker, use `caw send_node_message` with `run_id`, `node_id` and `message`. For multiple workers specify the exact `session_id` from that node's dispatch receipt; optional `attempt_id` asserts the intended attempt. It queues a steering instruction in the original worker, without restarting it. A `queued` receipt does not prove the worker has read it; the node journal records `consumed` on actual delivery. Keep the node's declared result schema and access grant. Completed, cancelled and result-submitting workers reject late messages. Current-chat Main already receives the parent conversation.
+
 ## Main and models
 
 Main inherits this Pi chat's model and thinking. Child models and thinking must be explicitly bound in the Workbench.

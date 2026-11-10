@@ -1,5 +1,9 @@
 # 独立迁移记录
 
+## 0.7.0：worker 消息、语义完成与评估记录
+
+发起 Agent 可向准确的活动 worker session 发送补充指令；消息在原 turn 中消费，保留原结果契约与授权。可信 SDK Host 可选择在已验证的语义提交后结束 fresh task，默认行为仍等待 assistant stop。嵌入式 Host 可等待准确 driver generation 的持久化和通知结果。结构化格式诊断支持数组及转义 JSON Pointer，并允许在整体结果持久化边界内修正长字段。本地 Workflow evaluator 用真实 service Runs 记录有界成对评估，并要求明确的人类授权后才会保存 Draft。详见 [完成生命周期](COMPLETION.md) 与 [Workflow 演化评估](evolution-workflows.md)。
+
 ## 0.5.10：逐项语义修复与原版程序接口
 
 真实三页 Run 的渲染器收到 `--mode page_batch`，三个 worker 因而报告阻塞。Pi 的逐项适配器却把具体原因替换为 `PI_HOST_CHECK_ITEM`，没有使用 core 已有的拒收及同 worker 修复机制。现在 submission 使用无副作用的逐项语义验证；已结束 turn 的 blocked/invalid 保留原 session、turn 和具体原因，在固定预算内只修复未通过条目。已通过的兄弟项及 Host 成功效果不重放。大结果可通过现有 stage 对数组内部字段做小补丁。机械执行失败仍明确终止，不消耗语义修复预算。

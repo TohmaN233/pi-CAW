@@ -12,7 +12,7 @@ import { feedbackText } from '../lib/run-feedback.mjs';
 import { projectWorkflowContext } from '../lib/notification-context.mjs';
 
 const actions = [...new Set(['capabilities', 'models', 'roles', 'list', 'get_workflow', 'create_workflow', 'save_workflow', 'validate',
-  'runs', 'inspect_run_admission', 'recover_run_admission', 'run_snapshot', 'run', 'launch_role', 'pause', 'cancel', 'continue', 'collect_host_tool', 'main_task', 'main_resource', 'main_tool', 'main_result',
+  'runs', 'inspect_run_admission', 'recover_run_admission', 'run_snapshot', 'run', 'launch_role', 'send_node_message', 'pause', 'cancel', 'continue', 'collect_host_tool', 'main_task', 'main_resource', 'main_tool', 'main_result',
   ...WORKBENCH_OPERATIONS])];
 
 export default function piCaw(pi: ExtensionAPI) {
@@ -158,6 +158,12 @@ export default function piCaw(pi: ExtensionAPI) {
       deliverMain: (prompt: string) => pi.sendUserMessage(prompt, { deliverAs: 'followUp' }),
       emit: (name: string, data: unknown) => pi.events.emit(name, data) });
     const candidate = new PiCawService({ directory: resolveStateDirectory(agentDir), host,
+      onEvolutionObservation: (observation: unknown) => {
+        const acknowledgement: { observation: unknown; accepted?: boolean; error?: unknown } = { observation };
+        pi.events.emit('pi-caw:evolution-observation', acknowledgement);
+        if (acknowledgement.error !== undefined) throw acknowledgement.error;
+        return acknowledgement.accepted === true;
+      },
       notify: (event: unknown) => {
         const deliveryId = (event as { delivery_id?: string }).delivery_id;
         if (deliveryId && context.sessionManager.getEntries().some((entry: any) => {
@@ -264,7 +270,7 @@ export default function piCaw(pi: ExtensionAPI) {
   });
   pi.registerTool({
     name: 'caw', label: 'pi-CAW',
-    description: 'Pi Workflow control plane and automatic Role delegation. Use route for compact valid Ready candidates; role_templates/role_template for one suitable helper; launch_role for its exact configured binding. Management supports graph/resources/history, Skill inventory/import/build/authoring, portable packages, dependency preparation and exact recovery. Logical Main inherits this chat model and thinking. Each Main node executor.mode is worker (default: fresh context with declared inputs/resources) or orchestration (Cooperative only: this chat and its native tools). The initiating Agent may select per-node Run args.main_modes, e.g. {final:"orchestration"}; Host validates and freezes the choices. Current-chat orchestration retrieves main_task, uses tools, submits main_result and finishes its turn; Host verifies actual entries and effects. Children require explicit Pi bindings. Runs notify asynchronously; do not poll. Model configuration, approval, patch integration and final publication require the human Workbench.',
+    description: 'Pi Workflow control plane and automatic Role delegation. Use route for compact valid Ready candidates; role_templates/role_template for one suitable helper; launch_role for its exact configured binding. Management supports graph/resources/history, Skill inventory/import/build/authoring, portable packages, dependency preparation and exact recovery. Logical Main inherits this chat model and thinking. Each Main node executor.mode is worker (default: fresh context with declared inputs/resources) or orchestration (Cooperative only: this chat and its native tools). The initiating Agent may select per-node Run args.main_modes, e.g. {final:"orchestration"}; Host validates and freezes the choices. Current-chat orchestration retrieves main_task, uses tools, submits main_result and finishes its turn; Host verifies actual entries and effects. Children require explicit Pi bindings. To relay instructions to a running worker, send_node_message takes run_id,node_id,message and optional session_id,attempt_id; session_id is required for multiple workers. It queues in the original session without restarting; queued is not consumed. Messages keep the original schema/grant and reject once result submission begins. Runs notify asynchronously; do not poll. Model configuration, approval, patch integration and final publication require the human Workbench.',
     parameters: Type.Object({ action: Type.Union(actions.map(value => Type.Literal(value))),
       args: Type.Optional(Type.Record(Type.String(), Type.Unknown())) }),
     async execute(id, params, _signal, _update, ctx) {

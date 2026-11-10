@@ -6,7 +6,8 @@ import { noSymlinks, requireValue } from './workflow-paths.mjs';
 import { syncDirectory } from './workflow-store.mjs';
 
 const MAX_JOURNAL = 128 * 1024 * 1024;
-const MAX_EVENT = 4 * 1024 * 1024;
+export const RUN_EVENT_MAX_BYTES = 4 * 1024 * 1024;
+const MAX_EVENT = RUN_EVENT_MAX_BYTES;
 // Runtime registration is Host state. Rebinding never rewrites the initial pin.
 const ENVIRONMENT_EVENTS = ['runtime_environment_attention', 'runtime_environment_rebound'];
 export const EVENT_KINDS = new Set(['generation_repair', 'generation_projection', 'generation_review_recheck', 'started', 'claim', 'complete', 'fail', 'retry', 'cancel', 'pause', 'resume', 'approve', 'dispatch_intent', 'dispatch_receipt', 'host_tool_intent', 'host_tool_receipt', 'usage', 'executor_event', 'completion_turn', 'native_agent_rejection', 'native_serial_result', 'native_parallel_result', 'native_item_results', 'managed_native_results', 'recover', 'control_recovery', 'child_intent', 'child_started']);
@@ -131,7 +132,7 @@ export class VerifiedJournalReader {
   }
 }
 
-export async function appendEvent(path, events, kind, payload) {
+export async function appendEvent(path, events, kind, payload, { sync = true } = {}) {
   requireValue(EVENT_KINDS.has(kind), 'RUN_EVENT_KIND', 'Unknown Run event');
   const content = { sequence: events.length + 1, previous: events.at(-1)?.hash ?? null, kind, at: new Date().toISOString(), payload };
   const event = { ...content, hash: digest(canonicalJSON(content)) };
@@ -143,7 +144,7 @@ export async function appendEvent(path, events, kind, payload) {
   catch (error) { if (error.code !== 'ENOENT') throw error; }
   requireValue(currentSize + Buffer.byteLength(bytes) <= MAX_JOURNAL, 'RUN_JOURNAL_LIMIT', 'Run journal is full; dependent execution is blocked');
   const file = await open(path, events.length ? 'a' : 'wx', 0o600);
-  try { await file.writeFile(bytes); await file.sync(); } finally { await file.close(); }
+  try { await file.writeFile(bytes); if (sync) await file.sync(); } finally { await file.close(); }
   return event;
 }
 
